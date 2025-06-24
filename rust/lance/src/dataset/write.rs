@@ -200,6 +200,9 @@ pub struct WriteParams {
     /// to set lance.auto_cleanup.interval and lance.auto_cleanup.older_than.
     /// Both parameters must be set to invoke autocleaning.
     pub auto_cleanup: Option<AutoCleanupParams>,
+
+    /// An optional commit message.
+    pub commit_message: Option<String>,
 }
 
 impl Default for WriteParams {
@@ -219,6 +222,7 @@ impl Default for WriteParams {
             enable_v2_manifest_paths: false,
             session: None,
             auto_cleanup: Some(AutoCleanupParams::default()),
+            commit_message: None,
         }
     }
 }
