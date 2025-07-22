@@ -277,7 +277,7 @@ impl<'a> InsertBuilder<'a> {
             operation,
         )
         .blobs_op(blobs_op)
-        .properties(context.params.properties.clone())
+        .transaction_properties(context.params.transaction_properties.clone())
         .build();
 
         Ok(transaction)

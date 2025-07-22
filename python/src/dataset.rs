@@ -1788,15 +1788,14 @@ impl Dataset {
     }
 
     /// Add helper method to allow pass properties without breaking add_columns
-    /// todo: other add_columns_from_* may need properties
     /// considering adding add_columns_builder in python in future
-    #[pyo3(signature = (transforms, read_columns = None, batch_size = None, properties = None))]
+    #[pyo3(signature = (transforms, read_columns = None, batch_size = None, transaction_properties = None))]
     fn add_columns_with_properties(
         &mut self,
         transforms: &Bound<'_, PyAny>,
         read_columns: Option<Vec<String>>,
         batch_size: Option<u32>,
-        properties: Option<HashMap<String, String>>,
+        transaction_properties: Option<HashMap<String, String>>,
     ) -> PyResult<()> {
         let transforms = transforms_from_python(transforms)?;
 
@@ -1807,7 +1806,7 @@ impl Dataset {
                     .add_columns_builder(transforms)
                     .read_columns(read_columns)
                     .batch_size(batch_size)
-                    .properties(properties)
+                    .transaction_properties(transaction_properties)
                     .execute()
                     .await?;
                 Ok(new_self)
@@ -2332,12 +2331,14 @@ pub fn get_write_params(options: &Bound<'_, PyDict>) -> PyResult<Option<WritePar
         p.commit_handler = get_commit_handler(options)?;
 
         // Handle properties
-        if let Some(props) = get_dict_opt::<HashMap<String, String>>(options, "properties")? {
-            let mut properties = p.properties.unwrap_or_default();
+        if let Some(props) =
+            get_dict_opt::<HashMap<String, String>>(options, "transaction_properties")?
+        {
+            let mut transaction_properties = p.transaction_properties.unwrap_or_default();
             for (key, value) in props {
-                properties.insert(key, value);
+                transaction_properties.insert(key, value);
             }
-            p.properties = Some(properties);
+            p.transaction_properties = Some(transaction_properties);
         }
 
         Some(p)

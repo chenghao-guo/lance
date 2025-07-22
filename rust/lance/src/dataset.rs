@@ -5822,7 +5822,7 @@ mod tests {
         properties1.insert("custom_prop".to_string(), "custom_value".to_string());
 
         let write_params = WriteParams {
-            properties: Some(properties1.clone()),
+            transaction_properties: Some(properties1.clone()),
             ..Default::default()
         };
 
@@ -5836,7 +5836,7 @@ mod tests {
 
         let transaction = dataset.read_transaction_by_version(1).await.unwrap();
         assert!(transaction.is_some());
-        let props = transaction.unwrap().properties.unwrap();
+        let props = transaction.unwrap().transaction_properties.unwrap();
         assert_eq!(props.len(), 2);
         assert_eq!(
             props.get(LANCE_COMMIT_MESSAGE_KEY),
@@ -5852,7 +5852,7 @@ mod tests {
         properties2.insert("another_prop".to_string(), "another_value".to_string());
 
         let write_params = WriteParams {
-            properties: Some(properties2.clone()),
+            transaction_properties: Some(properties2.clone()),
             mode: WriteMode::Append,
             ..Default::default()
         };
@@ -5877,7 +5877,7 @@ mod tests {
 
         let transaction = dataset.read_transaction_by_version(2).await.unwrap();
         assert!(transaction.is_some());
-        let props = transaction.unwrap().properties.unwrap();
+        let props = transaction.unwrap().transaction_properties.unwrap();
         assert_eq!(props.len(), 2);
         assert_eq!(
             props.get(LANCE_COMMIT_MESSAGE_KEY),
@@ -5890,7 +5890,7 @@ mod tests {
 
         let transaction = dataset.read_transaction_by_version(1).await.unwrap();
         assert!(transaction.is_some());
-        let props = transaction.unwrap().properties.unwrap();
+        let props = transaction.unwrap().transaction_properties.unwrap();
         assert_eq!(props.len(), 2);
         assert_eq!(
             props.get(LANCE_COMMIT_MESSAGE_KEY),

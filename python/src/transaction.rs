@@ -359,11 +359,7 @@ impl<'py> IntoPyObject<'py> for PyLance<&Operation> {
                     base_op.call0()
                 }
             }
-            _ => {
-                //use BaseOperation as a fallback
-                let base_op = namespace.getattr("BaseOperation")?;
-                base_op.call0()
-            }
+            _ => todo!(),
         }
     }
 }
@@ -377,9 +373,9 @@ impl FromPyObject<'_> for PyLance<Transaction> {
             .getattr("blobs_op")?
             .extract::<Option<PyLance<Operation>>>()?
             .map(|op| op.0);
-        let properties = match ob.hasattr("properties") {
+        let transaction_properties = match ob.hasattr("transaction_properties") {
             Ok(true) => {
-                let props = ob.getattr("properties")?;
+                let props = ob.getattr("transaction_properties")?;
                 if props.is_none() {
                     None
                 } else {
@@ -394,7 +390,7 @@ impl FromPyObject<'_> for PyLance<Transaction> {
             operation,
             blobs_op,
             tag: None,
-            properties,
+            transaction_properties,
         }))
     }
 }
@@ -425,10 +421,10 @@ impl<'py> IntoPyObject<'py> for PyLance<&Transaction> {
 
         let py_transaction = cls.call1((read_version, operation, uuid, blobs_op))?;
 
-        if let Some(properties) = &self.0.properties {
-            if py_transaction.hasattr("properties")? {
-                let py_dict = properties.into_pyobject(py)?;
-                py_transaction.setattr("properties", py_dict)?;
+        if let Some(transaction_properties) = &self.0.transaction_properties {
+            if py_transaction.hasattr("transaction_properties")? {
+                let py_dict = transaction_properties.into_pyobject(py)?;
+                py_transaction.setattr("transaction_properties", py_dict)?;
             }
         }
 

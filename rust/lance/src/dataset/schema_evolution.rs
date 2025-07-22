@@ -116,7 +116,7 @@ pub struct AddColumnsBuilder<'a> {
     transforms: NewColumnTransform,
     read_columns: Option<Vec<String>>,
     batch_size: Option<u32>,
-    properties: Option<HashMap<String, String>>,
+    transaction_properties: Option<HashMap<String, String>>,
 }
 
 impl<'a> AddColumnsBuilder<'a> {
@@ -127,7 +127,7 @@ impl<'a> AddColumnsBuilder<'a> {
             transforms,
             read_columns: None,
             batch_size: None,
-            properties: None,
+            transaction_properties: None,
         }
     }
 
@@ -151,8 +151,11 @@ impl<'a> AddColumnsBuilder<'a> {
     ///
     /// Properties are key-value pairs that will be stored with the transaction.
     /// This can include commit messages, engine information, etc.
-    pub fn properties(mut self, properties: Option<HashMap<String, String>>) -> Self {
-        self.properties = properties;
+    pub fn transaction_properties(
+        mut self,
+        transaction_properties: Option<HashMap<String, String>>,
+    ) -> Self {
+        self.transaction_properties = transaction_properties;
         self
     }
 
@@ -165,7 +168,7 @@ impl<'a> AddColumnsBuilder<'a> {
             self.transforms,
             self.read_columns,
             self.batch_size,
-            self.properties,
+            self.transaction_properties,
         )
         .await
     }
@@ -360,7 +363,7 @@ pub(super) async fn add_columns(
     transforms: NewColumnTransform,
     read_columns: Option<Vec<String>>,
     batch_size: Option<u32>,
-    properties: Option<HashMap<String, String>>,
+    transaction_properties: Option<HashMap<String, String>>,
 ) -> Result<()> {
     let (fragments, schema) = add_columns_to_fragments(
         dataset,
@@ -374,7 +377,7 @@ pub(super) async fn add_columns(
     let operation = Operation::Merge { fragments, schema };
 
     let transaction = TransactionBuilder::new(dataset.manifest.version, operation)
-        .properties(properties)
+        .transaction_properties(transaction_properties)
         .build();
 
     dataset

@@ -1210,7 +1210,7 @@ class LanceDataset(pa.dataset.Dataset):
         reader_schema: Optional[pa.Schema] = None,
         batch_size: Optional[int] = None,
         commit_message: Optional[str] = None,
-        properties: Optional[Dict[str, str]] = None,
+        transaction_properties: Optional[Dict[str, str]] = None,
     ):
         """
         Add new columns with defined values.
@@ -1253,7 +1253,7 @@ class LanceDataset(pa.dataset.Dataset):
         commit_message: str, optional
             A message to associate with this commit. This message will be stored in the
             transaction properties and can be retrieved using read_transaction().
-        properties: dict of str to str, optional
+        transaction_properties: dict of str to str, optional
             Custom properties to associate with this commit.
             These properties will be stored in the dataset's metadata
             and can be retrieved using read_transaction().
@@ -1297,7 +1297,9 @@ class LanceDataset(pa.dataset.Dataset):
             transforms = pa.schema(transforms)
 
         # Merge properties and commit_message with priority to commit_message
-        merged_properties = _merge_message_to_properties(commit_message, properties)
+        merged_properties = _merge_message_to_properties(
+            commit_message, transaction_properties
+        )
 
         if isinstance(transforms, pa.Schema):
             self._ds.add_columns_with_schema(transforms)
@@ -2826,10 +2828,10 @@ class LanceDataset(pa.dataset.Dataset):
         ... table2, \\
         ... "properties_example",   \\
         ... mode="append",  \\
-        ... properties=properties2)
-        >>> print(ds.read_transaction(1).properties)
+        ... transaction_properties=properties2)
+        >>> print(ds.read_transaction(1).transaction_properties)
         {'__lance_commit_message': 'initial'}
-        >>> print(ds.read_transaction(2).properties.get("another_prop"))
+        >>> print(ds.read_transaction(2).transaction_properties.get("another_prop"))
         another_value
         """
         return self._ds.read_transaction(version)
@@ -3056,7 +3058,7 @@ class Transaction:
     operation: LanceOperation.BaseOperation
     uuid: str = dataclasses.field(default_factory=lambda: str(uuid.uuid4()))
     blobs_op: Optional[LanceOperation.BaseOperation] = None
-    properties: Optional[Dict[str, str]] = None
+    transaction_properties: Optional[Dict[str, str]] = None
 
 
 class Tag(TypedDict):
@@ -4391,7 +4393,7 @@ def write_dataset(
     enable_move_stable_row_ids: bool = False,
     auto_cleanup_options: Optional[AutoCleanupConfig] = None,
     commit_message: Optional[str] = None,
-    properties: Optional[Dict[str, str]] = None,
+    transaction_properties: Optional[Dict[str, str]] = None,
 ) -> LanceDataset:
     """Write a given data_obj to the given uri
 
@@ -4464,7 +4466,7 @@ def write_dataset(
     commit_message: str, optional
         A message to associate with this commit. This message will be stored in the
         dataset's metadata and can be retrieved using read_transaction().
-    properties: dict of str to str, optional
+    transaction_properties: dict of str to str, optional
         Custom properties to associate with this transaction.
         Properties will be stored in the dataset's transaction
         and can be retrieved using read_transaction().
@@ -4495,7 +4497,9 @@ def write_dataset(
     # TODO add support for passing in LanceDataset and LanceScanner here
 
     # Merge properties and commit_message with priority to commit_message
-    merged_properties = _merge_message_to_properties(commit_message, properties)
+    merged_properties = _merge_message_to_properties(
+        commit_message, transaction_properties
+    )
 
     params = {
         "mode": mode,
@@ -4508,7 +4512,7 @@ def write_dataset(
         "enable_v2_manifest_paths": enable_v2_manifest_paths,
         "enable_move_stable_row_ids": enable_move_stable_row_ids,
         "auto_cleanup_options": auto_cleanup_options,
-        "properties": merged_properties,
+        "transaction_properties": merged_properties,
     }
 
     if commit_lock:

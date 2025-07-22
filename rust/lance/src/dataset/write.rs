@@ -211,7 +211,8 @@ pub struct WriteParams {
 
     /// Configuration key-value pairs for this write operation.
     /// This can include commit messages, engine information, etc.
-    pub properties: Option<HashMap<String, String>>,
+    /// this properties map will be persisted as part of Transaction object.
+    pub transaction_properties: Option<HashMap<String, String>>,
 }
 
 impl Default for WriteParams {
@@ -232,7 +233,7 @@ impl Default for WriteParams {
             session: None,
             auto_cleanup: Some(AutoCleanupParams::default()),
             skip_auto_cleanup: false,
-            properties: None,
+            transaction_properties: None,
         }
     }
 }
@@ -259,9 +260,9 @@ impl WriteParams {
     }
 
     /// Set the properties for this WriteParams.
-    pub fn with_properties(self, properties: HashMap<String, String>) -> Self {
+    pub fn with_transaction_properties(self, properties: HashMap<String, String>) -> Self {
         Self {
-            properties: Some(properties),
+            transaction_properties: Some(properties),
             ..self
         }
     }

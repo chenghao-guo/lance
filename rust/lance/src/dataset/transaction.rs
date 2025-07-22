@@ -93,7 +93,7 @@ pub struct Transaction {
     /// If this is `None`, then the blobs dataset was not modified
     pub blobs_op: Option<Operation>,
     pub tag: Option<String>,
-    pub properties: Option<HashMap<String, String>>,
+    pub transaction_properties: Option<HashMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -1025,7 +1025,7 @@ pub struct TransactionBuilder {
     operation: Operation,
     blobs_op: Option<Operation>,
     tag: Option<String>,
-    properties: Option<HashMap<String, String>>,
+    transaction_properties: Option<HashMap<String, String>>,
 }
 
 impl TransactionBuilder {
@@ -1035,7 +1035,7 @@ impl TransactionBuilder {
             operation,
             blobs_op: None,
             tag: None,
-            properties: None,
+            transaction_properties: None,
         }
     }
 
@@ -1049,8 +1049,11 @@ impl TransactionBuilder {
         self
     }
 
-    pub fn properties(mut self, properties: Option<HashMap<String, String>>) -> Self {
-        self.properties = properties;
+    pub fn transaction_properties(
+        mut self,
+        transaction_properties: Option<HashMap<String, String>>,
+    ) -> Self {
+        self.transaction_properties = transaction_properties;
         self
     }
 
@@ -1062,7 +1065,7 @@ impl TransactionBuilder {
             operation: self.operation,
             blobs_op: self.blobs_op,
             tag: self.tag,
-            properties: self.properties,
+            transaction_properties: self.transaction_properties,
         }
     }
 }
@@ -2076,10 +2079,10 @@ impl TryFrom<pb::Transaction> for Transaction {
             } else {
                 Some(message.tag.clone())
             },
-            properties: if message.properties.is_empty() {
+            transaction_properties: if message.transaction_properties.is_empty() {
                 None
             } else {
-                Some(message.properties)
+                Some(message.transaction_properties)
             },
         })
     }
@@ -2312,7 +2315,7 @@ impl From<&Transaction> for pb::Transaction {
             operation: Some(operation),
             blob_operation,
             tag: value.tag.clone().unwrap_or("".to_string()),
-            properties: value.properties.clone().unwrap_or_default(),
+            transaction_properties: value.transaction_properties.clone().unwrap_or_default(),
         }
     }
 }

@@ -3748,8 +3748,8 @@ def test_commit_messages_and_list(tmp_path):
     expected_messages = []
     for txn in transactions:
         message = None
-        if txn.properties:
-            message = txn.properties.get(LANCE_COMMIT_MESSAGE_KEY)
+        if txn.transaction_properties:
+            message = txn.transaction_properties.get(LANCE_COMMIT_MESSAGE_KEY)
         expected_messages.append(message)
 
     assert expected_messages == [
@@ -3775,13 +3775,13 @@ def test_read_transaction_properties(tmp_path):
         "custom_prop": "custom_value",
     }
 
-    dataset = lance.write_dataset(batch1, tmp_path, properties=properties1)
+    dataset = lance.write_dataset(batch1, tmp_path, transaction_properties=properties1)
     mytrans = dataset.read_transaction(1)
     print(mytrans)
 
     # Test retrieving properties from the first version
     transaction = dataset.read_transaction(1)
-    props = transaction.properties
+    props = transaction.transaction_properties
     assert props.get(LANCE_COMMIT_MESSAGE_KEY) == "First commit"
     assert props.get("custom_prop") == "custom_value"
 
@@ -3797,19 +3797,19 @@ def test_read_transaction_properties(tmp_path):
     }
 
     dataset = lance.write_dataset(
-        batch2, tmp_path, mode="append", properties=properties2
+        batch2, tmp_path, mode="append", transaction_properties=properties2
     )
 
     # Test retrieving properties from the second version
     transaction = dataset.read_transaction(2)
-    props = transaction.properties
+    props = transaction.transaction_properties
     assert props.get(LANCE_COMMIT_MESSAGE_KEY) == "Second commit"
     assert props.get("another_prop") == "another_value"
 
     # Test retrieving properties from the first version again
     # to ensure old versions' properties are still accessible
     transaction = dataset.read_transaction(1)
-    props = transaction.properties
+    props = transaction.transaction_properties
     assert props.get(LANCE_COMMIT_MESSAGE_KEY) == "First commit"
     assert props.get("custom_prop") == "custom_value"
 
@@ -3827,7 +3827,7 @@ def test_get_properties_with_no_properties(tmp_path):
 
     # Test retrieving properties - should return None
     transaction = dataset.read_transaction(1)
-    assert transaction.properties is None
+    assert transaction.transaction_properties is None
 
 
 def test_get_transactions_properties(tmp_path):
@@ -3838,7 +3838,10 @@ def test_get_transactions_properties(tmp_path):
     dataset = lance.write_dataset(table, tmp_path, commit_message="first commit")
     transactions = dataset.get_transactions()
     assert len(transactions) == 1
-    assert transactions[0].properties.get(LANCE_COMMIT_MESSAGE_KEY) == "first commit"
+    assert (
+        transactions[0].transaction_properties.get(LANCE_COMMIT_MESSAGE_KEY)
+        == "first commit"
+    )
     # 2. Test case: Commit without a message
     lance.write_dataset(table, tmp_path, mode="append")
     dataset = lance.dataset(tmp_path)
@@ -3848,15 +3851,18 @@ def test_get_transactions_properties(tmp_path):
     # The latest transaction has no message,
     # so the key should be missing or properties is None
     assert (
-        transactions[0].properties is None
-        or LANCE_COMMIT_MESSAGE_KEY not in transactions[0].properties
+        transactions[0].transaction_properties is None
+        or LANCE_COMMIT_MESSAGE_KEY not in transactions[0].transaction_properties
     )
     # The first transaction should still have the message
-    assert transactions[1].properties.get(LANCE_COMMIT_MESSAGE_KEY) == "first commit"
+    assert (
+        transactions[1].transaction_properties.get(LANCE_COMMIT_MESSAGE_KEY)
+        == "first commit"
+    )
     # 3. Test case: Transaction with no properties at all
     # A delete operation creates a new version that may have no properties.
     dataset.delete("a > 100")  # A no-op delete
     transactions = dataset.get_transactions()
     assert len(transactions) == 3
     # The latest transaction from delete should have no properties.
-    assert transactions[0].properties is None
+    assert transactions[0].transaction_properties is None
