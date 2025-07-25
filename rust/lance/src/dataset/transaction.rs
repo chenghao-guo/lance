@@ -1022,6 +1022,8 @@ impl Operation {
 /// Add TransactionBuilder for flexibly setting option without using `mut`
 pub struct TransactionBuilder {
     read_version: u64,
+    // uuid is optional for builder since it can autogenerate
+    uuid: Option<String>,
     operation: Operation,
     blobs_op: Option<Operation>,
     tag: Option<String>,
@@ -1032,11 +1034,17 @@ impl TransactionBuilder {
     pub fn new(read_version: u64, operation: Operation) -> Self {
         Self {
             read_version,
+            uuid: None,
             operation,
             blobs_op: None,
             tag: None,
             transaction_properties: None,
         }
+    }
+
+    pub fn uuid(mut self, uuid: String) -> Self {
+        self.uuid = Some(uuid);
+        self
     }
 
     pub fn blobs_op(mut self, blobs_op: Option<Operation>) -> Self {
@@ -1058,7 +1066,9 @@ impl TransactionBuilder {
     }
 
     pub fn build(self) -> Transaction {
-        let uuid = uuid::Uuid::new_v4().hyphenated().to_string();
+        let uuid = self
+            .uuid
+            .unwrap_or_else(|| Uuid::new_v4().hyphenated().to_string());
         Transaction {
             read_version: self.read_version,
             uuid,
