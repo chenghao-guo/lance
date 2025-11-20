@@ -61,11 +61,21 @@ use lance_arrow::as_fixed_size_list_array;
 use lance_core::Error;
 use lance_datafusion::utils::reader_to_stream;
 use lance_encoding::decoder::DecoderConfig;
-use lance_file::reader::FileReaderOptions;
+use lance_core::cache::LanceCache;
+use lance_file::reader::{FileReader as V2Reader, FileReaderOptions};
+use lance_file::writer::{FileWriter as V2Writer, FileWriterOptions as V2WriterOptions};
 use lance_index::scalar::inverted::query::{
     BooleanQuery, BoostQuery, FtsQuery, MatchQuery, MultiMatchQuery, Operator, PhraseQuery,
 };
 use lance_index::scalar::lance_format::LanceIndexStore;
+use lance_index::vector::graph::{DISTS_FIELD, NEIGHBORS_FIELD};
+use lance_index::vector::hnsw::builder::HNSW_METADATA_KEY;
+use lance_index::vector::hnsw::HnswMetadata;
+use lance_index::vector::hnsw::VECTOR_ID_FIELD;
+use lance_index::vector::ivf::storage::{IvfModel as IvfStorageModel, IVF_METADATA_KEY};
+use lance_index::vector::DISTANCE_TYPE_KEY;
+use lance_index::INDEX_AUXILIARY_FILE_NAME;
+use lance_index::INDEX_METADATA_SCHEMA_KEY;
 use lance_index::{
     infer_system_index_type, metrics::NoOpMetricsCollector, scalar::inverted::query::Occur,
 };
@@ -79,9 +89,12 @@ use lance_index::{
     DatasetIndexExt, IndexParams, IndexType,
 };
 use lance_io::object_store::ObjectStoreParams;
+use lance_io::scheduler::{ScanScheduler, SchedulerConfig};
+use lance_io::utils::CachedFileSize;
 use lance_linalg::distance::MetricType;
 use lance_table::format::{BasePath, Fragment};
 use lance_table::io::commit::CommitHandler;
+// use lance_table::io::manifest::ManifestDescribing;
 
 use crate::error::PythonErrorExt;
 use crate::file::object_store_from_uri_or_path;
@@ -107,6 +120,14 @@ pub mod stats;
 
 const DEFAULT_NPROBES: usize = 1;
 const LANCE_COMMIT_MESSAGE_KEY: &str = "__lance_commit_message";
+
+/// Build index metadata JSON (type + distance) for root index schema metadata.
+fn build_index_meta_json(index_type: &str, dt: &str) -> lance::Result<String> {
+    Ok(serde_json::to_string(&lance_index::IndexMetadata {
+        index_type: index_type.to_string(),
+        distance_type: dt.to_string(),
+    })?)
+}
 
 fn convert_reader(reader: &Bound<PyAny>) -> PyResult<Box<dyn RecordBatchReader + Send>> {
     let py = reader.py();
@@ -1961,7 +1982,7 @@ impl Dataset {
             .infer_error()
     }
 
-    #[pyo3(signature = (index_uuid, index_type, batch_readhead))]
+    #[pyo3(signature=(index_uuid, index_type, batch_readhead=None))]
     fn merge_index_metadata(
         &self,
         index_uuid: &str,
@@ -1971,7 +1992,13 @@ impl Dataset {
         rt().block_on(None, async {
             let store = LanceIndexStore::from_dataset_for_new(self.ds.as_ref(), index_uuid)?;
             let index_dir = self.ds.indices_dir().child(index_uuid);
-            match index_type.to_uppercase().as_str() {
+            let itype_up = index_type.to_uppercase();
+            log::info!(
+                "merge_index_metadata called with index_type={} (upper={})",
+                index_type,
+                itype_up
+            );
+            match itype_up.as_str() {
                 "INVERTED" => {
                     // Call merge_index_files function for inverted index
                     lance_index::scalar::inverted::builder::merge_index_files(
@@ -1983,16 +2010,139 @@ impl Dataset {
                 }
                 "BTREE" => {
                     // Call merge_index_files function for btree index
+                    // If not provided, default to 1 as documented
+                    let readahead = Some(batch_readhead.unwrap_or(1));
                     lance_index::scalar::btree::merge_index_files(
                         self.ds.object_store(),
                         &index_dir,
                         Arc::new(store),
-                        batch_readhead,
+                        readahead,
                     )
                     .await
                 }
-                _ => Err(Error::InvalidInput {
-                    source: format!("Index type {} is not supported.", index_type).into(),
+                // Precise vector index types: IVF_FLAT, IVF_PQ, IVF_SQ, IVF_HNSW_FLAT, IVF_HNSW_PQ, IVF_HNSW_SQ
+                "IVF_FLAT" | "IVF_PQ" | "IVF_SQ" | "IVF_HNSW_FLAT" | "IVF_HNSW_PQ" | "IVF_HNSW_SQ" | "VECTOR" => {
+                    // Merge distributed vector index partials into unified auxiliary.idx
+                    lance_index::vector::distributed::index_merger::merge_vector_index_files(
+                        self.ds.object_store(),
+                        &index_dir,
+                    )
+                    .await?;
+                    // Then, create a root index.idx with unified IVF metadata so open_vector_index_v2 can load it
+                    let aux_path = index_dir.child(INDEX_AUXILIARY_FILE_NAME);
+                    let scheduler = ScanScheduler::new(
+                        Arc::new(self.ds.object_store().clone()),
+                        SchedulerConfig::max_bandwidth(&self.ds.object_store()),
+                    );
+                    let fh = scheduler
+                        .open_file(&aux_path, &CachedFileSize::unknown())
+                        .await?;
+                    let aux_reader = V2Reader::try_open(
+                        fh,
+                        None,
+                        Arc::default(),
+                        &LanceCache::no_cache(),
+                        FileReaderOptions::default(),
+                    )
+                    .await?;
+                    // Read IVF metadata buffer from unified auxiliary file
+                    let meta = aux_reader.metadata();
+                    let ivf_buf_idx: u32 = meta
+                        .file_schema
+                        .metadata
+                        .get(IVF_METADATA_KEY)
+                        .ok_or_else(|| lance::Error::Index {
+                            message: "IVF meta missing in unified auxiliary".to_string(),
+                            location: location!(),
+                        })?
+                        .parse()
+                        .map_err(|_| lance::Error::Index {
+                            message: "IVF index parse error".to_string(),
+                            location: location!(),
+                        })?;
+                    let ivf_bytes = aux_reader.read_global_buffer(ivf_buf_idx).await?;
+                    // Prepare index metadata JSON: reuse if present in auxiliary, otherwise default to requested type with detected distance
+                    let index_meta_json = if let Some(idx_json) =
+                        meta.file_schema.metadata.get(INDEX_METADATA_SCHEMA_KEY)
+                    {
+                        idx_json.clone()
+                    } else {
+                        let dt = meta
+                            .file_schema
+                            .metadata
+                            .get(DISTANCE_TYPE_KEY)
+                            .cloned()
+                            .unwrap_or_else(|| "l2".to_string());
+                        build_index_meta_json(&itype_up, &dt)?
+                    };
+                    // Write root index.idx via V2 writer so downstream opens through v2 path
+                    let index_path = index_dir.child(lance_index::INDEX_FILE_NAME);
+                    let obj_writer = self.ds.object_store().create(&index_path).await?;
+
+                    // Schema for HNSW sub-index: include neighbors/dist fields; empty batch is fine
+                    let arrow_schema = Arc::new(ArrowSchema::new(vec![
+                        VECTOR_ID_FIELD.clone(),
+                        NEIGHBORS_FIELD.clone(),
+                        DISTS_FIELD.clone(),
+                    ]));
+                    let schema = lance_core::datatypes::Schema::try_from(arrow_schema.as_ref())?;
+                    let mut v2_writer =
+                        V2Writer::try_new(obj_writer, schema, V2WriterOptions::default())?;
+
+                    // Attach precise index metadata (type + distance)
+                    v2_writer.add_schema_metadata(INDEX_METADATA_SCHEMA_KEY, &index_meta_json);
+
+                    // Add IVF protobuf as a global buffer and reference via IVF_METADATA_KEY
+                    let pos = v2_writer
+                        .add_global_buffer(bytes::Bytes::from(ivf_bytes))
+                        .await?;
+                    v2_writer.add_schema_metadata(IVF_METADATA_KEY, pos.to_string());
+
+                    // For HNSW variants, attach per-partition metadata list under HNSW key
+                    // If index type isn't HNSW, we still write an empty list which is ignored by FLAT/PQ/SQ loaders
+                    let idx_meta: lance_index::IndexMetadata =
+                        serde_json::from_str(&index_meta_json)?;
+                    let is_hnsw = idx_meta.index_type.starts_with("IVF_HNSW");
+                    let is_flat_based = matches!(
+                        idx_meta.index_type.as_str(),
+                        "IVF_FLAT" | "IVF_PQ" | "IVF_SQ"
+                    );
+
+                    // Determine number of partitions from IVF metadata (needed for both HNSW and FLAT-based variants)
+                    let pb_ivf: lance_index::pb::Ivf = prost::Message::decode(
+                        aux_reader.read_global_buffer(ivf_buf_idx).await?,
+                    )?;
+                    let ivf_model: IvfStorageModel = IvfStorageModel::try_from(pb_ivf)?;
+                    let nlist = ivf_model.num_partitions();
+
+                    if is_hnsw {
+                        // For HNSW sub-index variants, attach per-partition HNSW metadata list
+                        let default_meta = HnswMetadata::default();
+                        let meta_vec: Vec<String> = (0..nlist)
+                            .map(|_| serde_json::to_string(&default_meta).unwrap())
+                            .collect();
+                        let meta_vec_json = serde_json::to_string(&meta_vec)?;
+                        v2_writer.add_schema_metadata(HNSW_METADATA_KEY, meta_vec_json);
+                    } else if is_flat_based {
+                        // For FLAT-based sub-index variants (IVF_FLAT / IVF_PQ / IVF_SQ),
+                        // write a JSON array of strings of length = nlist under key "lance:flat".
+                        // Each element can be a minimal valid JSON object string.
+                        let meta_vec: Vec<String> = (0..nlist).map(|_| "{}".to_string()).collect();
+                        let meta_vec_json = serde_json::to_string(&meta_vec)?;
+                        v2_writer.add_schema_metadata("lance:flat", meta_vec_json);
+                    }
+
+                    // Write an empty batch to satisfy reader expectations
+                    let empty_batch = RecordBatch::new_empty(arrow_schema);
+                    v2_writer.write_batch(&empty_batch).await?;
+                    v2_writer.finish().await?;
+                    Ok(())
+                }
+                _ => Err(lance::Error::InvalidInput {
+                    source: Box::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("Unsupported index type (patched): {}", itype_up),
+                    )),
                     location: location!(),
                 }),
             }
