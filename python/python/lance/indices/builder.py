@@ -203,6 +203,79 @@ class IndicesBuilder:
         )
         return PqModel(num_subvectors, pq_codebook)
 
+    def prepare_global_ivfpq(
+        self,
+        num_partitions: int,
+        num_subvectors: int,
+        *,
+        distance_type: str = "l2",
+        accelerator: Optional[Union[str, "torch.Device"]] = None,
+        sample_rate: int = 256,
+        max_iters: int = 50,
+    ) -> dict:
+        """
+        Perform global training for IVF+PQ using existing CPU training paths and
+        return preprocessed artifacts for distributed builds.
+
+        Returns
+        -------
+        dict
+            A dictionary with two entries:
+            - "ivf_centroids": pyarrow.FixedSizeListArray of centroids
+            - "pq_codebook": pyarrow.FixedSizeListArray of PQ codebook
+
+        Notes
+        -----
+        This method uses the existing CPU training path by delegating to
+        `IndicesBuilder.train_ivf` (indices.train_ivf_model) and
+        `IndicesBuilder.train_pq` (indices.train_pq_model). No public method
+        names elsewhere are changed.
+        """
+        # Global IVF training
+        ivf_model = self.train_ivf(
+            num_partitions,
+            distance_type=distance_type,
+            accelerator=accelerator,  # None by default (CPU path)
+            sample_rate=sample_rate,
+            max_iters=max_iters,
+        )
+
+        # Global PQ training using IVF residuals
+        pq_model = self.train_pq(
+            ivf_model,
+            num_subvectors,
+            sample_rate=sample_rate,
+            max_iters=max_iters,
+        )
+
+        # Return arrays directly; dataset.create_index will wrap them into RecordBatch
+        return {"ivf_centroids": ivf_model.centroids, "pq_codebook": pq_model.codebook}
+
+    def prepare(
+        self,
+        num_partitions: Optional[int] = None,
+        num_subvectors: Optional[int] = None,
+        *,
+        distance_type: str = "l2",
+        accelerator: Optional[Union[str, "torch.Device"]] = None,
+        sample_rate: int = 256,
+        max_iters: int = 50,
+    ) -> dict:
+        """
+        Convenience alias for IVF_PQ prepare.
+        """
+        num_rows = self.dataset.count_rows()
+        nparts = self._determine_num_partitions(num_partitions, num_rows)
+        nsub = self._normalize_pq_params(num_subvectors, self.dimension)
+        return self.prepare_global_ivfpq(
+            nparts,
+            nsub,
+            distance_type=distance_type,
+            accelerator=accelerator,
+            sample_rate=sample_rate,
+            max_iters=max_iters,
+        )
+
     def assign_ivf_partitions(
         self,
         ivf_model: IvfModel,
@@ -521,3 +594,129 @@ class IndicesBuilder:
 class IndexConfig:
     index_type: str  # The type of index to create (e.g. btree, zonemap, json)
     parameters: dict  # Parameters to configure the index
+
+
+def _split_fragments_evenly(fragment_ids: list[int], world: int) -> list[list[int]]:
+    """
+    Split fragment ids into `world` groups as evenly as possible.
+    """
+    n = len(fragment_ids)
+    if world <= 0:
+        raise ValueError("world must be >= 1")
+    if n == 0:
+        return [[] for _ in range(world)]
+    group_size = n // world
+    remainder = n % world
+    groups = []
+    start = 0
+    for rank in range(world):
+        extra = 1 if rank < remainder else 0
+        end = start + group_size + extra
+        groups.append(fragment_ids[start:end])
+        start = end
+    return groups
+
+
+def _commit_index_helper(
+    ds,
+    index_uuid: str,
+    column: str,
+    index_name: Optional[str] = None,
+):
+    """
+    Helper to finalize index commit after merge_index_metadata.
+
+    Builds a lance.dataset.Index record and commits a CreateIndex operation.
+    Returns the updated dataset object.
+    """
+    import lance
+    from lance.dataset import Index
+
+    lance_field = ds.lance_schema.field(column)
+    if lance_field is None:
+        raise KeyError(f"{column} not found in schema")
+    field_id = lance_field.id()
+
+    if index_name is None:
+        index_name = f"{column}_idx"
+
+    frag_ids = set(f.fragment_id for f in ds.get_fragments())
+
+    index = Index(
+        uuid=index_uuid,
+        name=index_name,
+        fields=[field_id],
+        dataset_version=ds.version,
+        fragment_ids=frag_ids,
+        index_version=0,
+    )
+    create_index_op = lance.LanceOperation.CreateIndex(
+        new_indices=[index], removed_indices=[]
+    )
+    ds = lance.LanceDataset.commit(ds.uri, create_index_op, read_version=ds.version)
+    return ds
+
+
+def build_distributed_vector_index(
+    dataset,
+    column,
+    *,
+    index_type: str = "IVF_PQ",
+    num_partitions: Optional[int] = None,
+    num_sub_vectors: Optional[int] = None,
+    world: int = 2,
+    preprocessed_data: Optional[dict] = None,
+    **index_params,
+):
+    """
+    Build a distributed vector index over fragment groups and commit.
+
+    Steps:
+    - Partition fragments into `world` groups
+    - For each group, call create_index with fragment_ids and a shared index_uuid
+    - Optionally pass preprocessed ivf_centroids/pq_codebook
+    - Merge metadata (commit index manifest)
+
+    Returns the dataset (post-merge) for querying.
+    """
+    import uuid as _uuid
+
+    frags = dataset.get_fragments()
+    frag_ids = [f.fragment_id for f in frags]
+    groups = _split_fragments_evenly(frag_ids, world)
+    shared_uuid = str(_uuid.uuid4())
+
+    # Prepare kwargs for preprocessed artifacts if provided
+    extra_kwargs = {}
+    if preprocessed_data is not None:
+        if (
+            "ivf_centroids" in preprocessed_data
+            and preprocessed_data["ivf_centroids"] is not None
+        ):
+            extra_kwargs["ivf_centroids"] = preprocessed_data["ivf_centroids"]
+        if (
+            "pq_codebook" in preprocessed_data
+            and preprocessed_data["pq_codebook"] is not None
+        ):
+            extra_kwargs["pq_codebook"] = preprocessed_data["pq_codebook"]
+
+    for g in groups:
+        if not g:
+            continue
+        dataset.create_index(
+            column=column,
+            index_type=index_type,
+            fragment_ids=g,
+            index_uuid=shared_uuid,
+            num_partitions=num_partitions,
+            num_sub_vectors=num_sub_vectors,
+            **extra_kwargs,
+            **index_params,
+        )
+
+    # Merge physical index metadata and commit manifest for the concrete index_type
+    # Bypass Python wrapper restriction (which allows only scalar types) by calling the
+    # underlying Dataset binding directly and pass batch_readhead=None.
+    dataset._ds.merge_index_metadata(shared_uuid, index_type, None)
+    dataset = _commit_index_helper(dataset, shared_uuid, column=column)
+    return dataset
