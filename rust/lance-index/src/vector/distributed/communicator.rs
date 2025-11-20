@@ -3,10 +3,10 @@
 
 //! Minimal communicator abstraction for distributed training
 
-use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
 use lance_core::{Error, Result};
 use snafu::location;
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
 
 /// Abstraction for basic collectives needed by distributed KMeans
 pub trait Communicator: Send + Sync {

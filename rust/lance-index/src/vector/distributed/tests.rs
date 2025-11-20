@@ -15,7 +15,6 @@ mod tests {
     };
 
     use crate::vector::distributed::quality_validator::QualityValidator;
-    use crate::vector::hnsw::builder::HnswBuildParams;
     use crate::vector::ivf::builder::IvfBuildParams;
     use arrow_array::cast::AsArray;
     use arrow_array::{Array, FixedSizeListArray, Float32Array};
@@ -40,8 +39,6 @@ mod tests {
         assert_eq!(config.batch_size, 10000);
         assert!(config.ivf_config.enable_adaptive_retraining);
     }
-
-
 
     #[tokio::test]
     async fn test_quality_validator() {

@@ -52,7 +52,12 @@ impl DistributedIvfFlatParams {
 }
 
 /// Wait until all expected shard files exist or timeout
-async fn wait_for_all_shards(store: &ObjectStore, shard_root: &Path, world: usize, timeout_ms: u64) -> Result<()> {
+async fn wait_for_all_shards(
+    store: &ObjectStore,
+    shard_root: &Path,
+    world: usize,
+    timeout_ms: u64,
+) -> Result<()> {
     use std::time::{Duration, Instant};
     let start = Instant::now();
     let timeout = Duration::from_millis(timeout_ms);
@@ -71,7 +76,16 @@ async fn wait_for_all_shards(store: &ObjectStore, shard_root: &Path, world: usiz
             return Ok(());
         }
         if start.elapsed() >= timeout {
-            return Err(Error::IO { source: Box::new(std::io::Error::new(std::io::ErrorKind::TimedOut, format!("timeout waiting for {} shard files under {}", world, shard_root))), location: location!(), });
+            return Err(Error::IO {
+                source: Box::new(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!(
+                        "timeout waiting for {} shard files under {}",
+                        world, shard_root
+                    ),
+                )),
+                location: location!(),
+            });
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }

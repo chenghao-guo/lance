@@ -458,14 +458,15 @@ impl DistributedIvfCoordinator {
             }
             // AllReduce offloaded
             let comm_clone = Arc::clone(&comm);
-            let (glob_sums, glob_cnt) = tokio::task::spawn_blocking(move || -> Result<(Vec<Vec<f32>>, Vec<usize>)> {
-                comm_clone.allreduce_sums_counts(&local_sums, &local_cnt)
-            })
-            .await
-            .map_err(|e| Error::Index {
-                message: format!("spawn_blocking allreduce failed: {}", e),
-                location: location!(),
-            })??;
+            let (glob_sums, glob_cnt) =
+                tokio::task::spawn_blocking(move || -> Result<(Vec<Vec<f32>>, Vec<usize>)> {
+                    comm_clone.allreduce_sums_counts(&local_sums, &local_cnt)
+                })
+                .await
+                .map_err(|e| Error::Index {
+                    message: format!("spawn_blocking allreduce failed: {}", e),
+                    location: location!(),
+                })??;
             // Update centroids using global sums
             for k in 0..num_partitions {
                 if glob_cnt[k] > 0 {
@@ -479,14 +480,12 @@ impl DistributedIvfCoordinator {
             _last_loss_glb = local_loss;
             // Barrier offloaded
             let comm_clone = Arc::clone(&comm);
-            tokio::task::spawn_blocking(move || -> Result<()> {
-                comm_clone.barrier()
-            })
-            .await
-            .map_err(|e| Error::Index {
-                message: format!("spawn_blocking barrier failed: {}", e),
-                location: location!(),
-            })??;
+            tokio::task::spawn_blocking(move || -> Result<()> { comm_clone.barrier() })
+                .await
+                .map_err(|e| Error::Index {
+                    message: format!("spawn_blocking barrier failed: {}", e),
+                    location: location!(),
+                })??;
         }
         // Pack result
         let flat: Vec<f32> = centroids.into_iter().flatten().collect();
@@ -599,7 +598,11 @@ impl DistributedIvfCoordinator {
             }
         }
 
-        Ok(if min_distance == f64::MAX { 0.0 } else { min_distance })
+        Ok(if min_distance == f64::MAX {
+            0.0
+        } else {
+            min_distance
+        })
     }
 
     pub async fn train_ivf_centroids(&self, _fragments: Vec<String>) -> Result<FixedSizeListArray> {

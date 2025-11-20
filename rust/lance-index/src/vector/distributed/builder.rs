@@ -30,8 +30,8 @@ impl DistributedVectorIndexBuilder {
         }
     }
 
-    /// Build distributed IVF-HNSW index
-    pub async fn build_distributed_ivf_hnsw(
+    /// Build distributed IVF index
+    pub async fn build_distributed_ivf(
         &self,
         fragments: &[FragmentData],
         column: &str,
@@ -44,21 +44,27 @@ impl DistributedVectorIndexBuilder {
         );
 
         log::info!(
-            "Building distributed IVF-HNSW index with {} fragments on column {} with {} partitions",
+            "Building distributed IVF index with {} fragments on column {} with {} partitions",
             fragments.len(),
             column,
             num_partitions
         );
 
-        // Get adjusted parameters
-        let ivf_params = coordinator.get_adjusted_ivf_params(num_partitions);
-        let hnsw_params = coordinator.get_adjusted_hnsw_params();
-
-        log::debug!("Adjusted IVF params: {:?}", ivf_params);
-        log::debug!("Adjusted HNSW params: {:?}", hnsw_params);
+        // Convert FragmentData to ivf_coordinator::Fragment
+        let ivf_fragments: Vec<super::ivf_coordinator::Fragment> = fragments
+            .iter()
+            .map(|frag| super::ivf_coordinator::Fragment {
+                id: frag.fragment_id,
+                data_path: frag.data_path.clone(),
+                row_count: frag.row_count,
+                sample_override: None,
+            })
+            .collect();
 
         // Start the building process
-        coordinator.build_distributed_ivf_hnsw(num_partitions).await
+        coordinator
+            .build_distributed_ivf(ivf_fragments, column.to_string(), num_partitions)
+            .await
     }
 
     /// Get the configuration

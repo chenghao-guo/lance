@@ -12,7 +12,6 @@ pub mod ivf_coordinator;
 pub mod ivf_flat_builder;
 pub mod ivf_pq_coordinator;
 
-
 pub mod pq_trainer;
 pub mod progress_tracker;
 pub mod quality_validator;
