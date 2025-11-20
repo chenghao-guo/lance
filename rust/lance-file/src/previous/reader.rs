@@ -195,8 +195,15 @@ impl FileReader {
                 // We have not read the metadata bytes yet.
                 read_struct(object_reader, metadata_pos).await?
             } else {
-                let offset = tail_bytes.len() - (file_size - metadata_pos);
-                read_struct_from_buf(&tail_bytes.slice(offset..))?
+                let offset = tail_bytes
+                    .len()
+                    .saturating_sub(file_size.saturating_sub(metadata_pos));
+                if file_size.saturating_sub(metadata_pos) > tail_bytes.len() {
+                    // Metadata position is not within the tail bytes; read directly from object reader
+                    read_struct(object_reader, metadata_pos).await?
+                } else {
+                    read_struct_from_buf(&tail_bytes.slice(offset..))?
+                }
             };
             Ok(metadata)
         })

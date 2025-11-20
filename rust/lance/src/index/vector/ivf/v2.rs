@@ -261,27 +261,31 @@ impl<S: IvfSubIndex + 'static, Q: Quantization> IVFIndex<S, Q> {
                 part_idx
             } else {
                 let schema = Arc::new(self.reader.schema().as_ref().into());
-                let batch = match self.reader.metadata().num_rows {
-                    0 => RecordBatch::new_empty(schema),
-                    _ => {
-                        let row_range = self.ivf.row_range(partition_id);
-                        if row_range.is_empty() {
-                            RecordBatch::new_empty(schema)
-                        } else {
-                            let batches = self
-                                .reader
-                                .read_stream(
-                                    ReadBatchParams::Range(row_range),
-                                    u32::MAX,
-                                    1,
-                                    FilterExpression::no_filter(),
-                                )?
-                                .try_collect::<Vec<_>>()
-                                .await?;
-                            concat_batches(&schema, batches.iter())?
-                        }
+                let batch = {
+                    let num_rows_meta = self.reader.metadata().num_rows;
+                    let num_rows_reader = self.reader.num_rows();
+                    let row_range = self.ivf.row_range(partition_id);
+                    if num_rows_meta == 0
+                        || num_rows_reader == 0
+                        || row_range.is_empty()
+                        || (row_range.end as u64) > num_rows_reader
+                    {
+                        RecordBatch::new_empty(schema)
+                    } else {
+                        let batches = self
+                            .reader
+                            .read_stream(
+                                ReadBatchParams::Range(row_range),
+                                u32::MAX,
+                                1,
+                                FilterExpression::no_filter(),
+                            )?
+                            .try_collect::<Vec<_>>()
+                            .await?;
+                        concat_batches(&schema, batches.iter())?
                     }
                 };
+
                 let batch = batch.add_metadata(
                     S::metadata_key().to_owned(),
                     self.sub_index_metadata[partition_id].clone(),
@@ -315,17 +319,14 @@ impl<S: IvfSubIndex + 'static, Q: Quantization> IVFIndex<S, Q> {
     #[instrument(level = "debug", skip(self))]
     pub fn preprocess_query(&self, partition_id: usize, query: &Query) -> Result<Query> {
         if Q::use_residual(self.distance_type) {
-            let partition_centroids =
-                self.ivf
-                    .centroid(partition_id)
-                    .ok_or_else(|| Error::Index {
-                        message: format!("partition centroid {} does not exist", partition_id),
-                        location: location!(),
-                    })?;
-            let residual_key = sub(&query.key, &partition_centroids)?;
-            let mut part_query = query.clone();
-            part_query.key = residual_key;
-            Ok(part_query)
+            if let Some(partition_centroids) = self.ivf.centroid(partition_id) {
+                let residual_key = sub(&query.key, &partition_centroids)?;
+                let mut part_query = query.clone();
+                part_query.key = residual_key;
+                Ok(part_query)
+            } else {
+                Ok(query.clone())
+            }
         } else {
             Ok(query.clone())
         }
