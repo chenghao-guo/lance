@@ -2339,7 +2339,14 @@ def assert_distributed_vector_consistency(
 
     # Execute and compare results for each query
     for i, q in enumerate(queries or []):
-        nearest = {"column": column, "q": q, "k": topk}
+        # Refine distance to match exact search
+        nearest = {"column": column, "q": q, "k": topk, "refine_factor": 1}
+        if "IVF" in index_type:
+            # Improve recall for IVF-based indices by probing multiple partitions
+            nearest["nprobes"] = max(8, int(index_params.get("num_partitions", 8)))
+            # For HNSW-based variants, widen search to improve intersection with exact
+            if "HNSW" in index_type:
+                nearest["ef"] = max(64, 4 * int(index_params.get("num_partitions", 8)))
 
         single_res = single_ds.to_table(
             nearest=nearest, columns=["id", "_distance"]
