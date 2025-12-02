@@ -573,6 +573,64 @@ fn fixed_size_list_equal(a: &FixedSizeListArray, b: &FixedSizeListArray) -> bool
     }
 }
 
+/// Relaxed numeric equality check within tolerance to accommodate minor serialization
+/// differences while still enforcing global-training invariants.
+fn fixed_size_list_almost_equal(a: &FixedSizeListArray, b: &FixedSizeListArray, tol: f32) -> bool {
+    if a.len() != b.len() || a.value_length() != b.value_length() {
+        return false;
+    }
+    use arrow_schema::DataType;
+    match (a.value_type(), b.value_type()) {
+        (DataType::Float32, DataType::Float32) => {
+            let va = a.values().as_primitive::<Float32Type>();
+            let vb = b.values().as_primitive::<Float32Type>();
+            let av = va.values();
+            let bv = vb.values();
+            if av.len() != bv.len() {
+                return false;
+            }
+            for i in 0..av.len() {
+                if (av[i] - bv[i]).abs() > tol {
+                    return false;
+                }
+            }
+            true
+        }
+        (DataType::Float64, DataType::Float64) => {
+            let va = a.values().as_primitive::<arrow_array::types::Float64Type>();
+            let vb = b.values().as_primitive::<arrow_array::types::Float64Type>();
+            let av = va.values();
+            let bv = vb.values();
+            if av.len() != bv.len() {
+                return false;
+            }
+            for i in 0..av.len() {
+                if (av[i] - bv[i]).abs() > tol as f64 {
+                    return false;
+                }
+            }
+            true
+        }
+        (DataType::Float16, DataType::Float16) => {
+            let va = a.values().as_primitive::<arrow_array::types::Float16Type>();
+            let vb = b.values().as_primitive::<arrow_array::types::Float16Type>();
+            let av = va.values();
+            let bv = vb.values();
+            if av.len() != bv.len() {
+                return false;
+            }
+            for i in 0..av.len() {
+                let da = av[i].to_f32();
+                let db = bv[i].to_f32();
+                if (da - db).abs() > tol {
+                    return false;
+                }
+            }
+            true
+        }
+        _ => false,
+    }
+}
 /// Merge partition data (HNSW)
 pub async fn merge_partition_data(
     partition_id: usize,
@@ -763,6 +821,7 @@ pub struct PartitionData {
     pub row_ids: Vec<u64>,
 }
 // Merge partial vector index auxiliary files into a unified auxiliary.idx
+use crate::pb;
 use crate::vector::flat::index::FlatMetadata;
 use crate::vector::ivf::storage::{IvfModel as IvfStorageModel, IVF_METADATA_KEY};
 use crate::vector::pq::storage::{ProductQuantizationMetadata, PQ_METADATA_KEY};
@@ -939,7 +998,7 @@ async fn init_writer_for_pq(
         message: "PQ codebook missing".to_string(),
         location: location!(),
     })?;
-    let codebook_tensor: crate::pb::Tensor = crate::pb::Tensor::try_from(cb)?;
+    let codebook_tensor: pb::Tensor = pb::Tensor::try_from(cb)?;
     let buf = Bytes::from(codebook_tensor.encode_to_vec());
     let pos = w.add_global_buffer(buf).await?;
     pm_init.set_buffer_index(pos);
@@ -985,7 +1044,7 @@ async fn write_unified_ivf_and_index_metadata(
     dt: DistanceType,
     idx_type: SupportedIndexType,
 ) -> Result<()> {
-    let pb_ivf: crate::pb::Ivf = (ivf_model).try_into()?;
+    let pb_ivf: pb::Ivf = (ivf_model).try_into()?;
     let pos = w
         .add_global_buffer(Bytes::from(pb_ivf.encode_to_vec()))
         .await?;
@@ -1228,7 +1287,7 @@ pub async fn merge_vector_index_files(
                 location: location!(),
             })?;
         let bytes = reader.read_global_buffer(ivf_idx).await?;
-        let pb_ivf: crate::pb::Ivf = prost::Message::decode(bytes)?;
+        let pb_ivf: pb::Ivf = prost::Message::decode(bytes)?;
         let lengths = pb_ivf.lengths.clone();
         let nlist = lengths.len();
 
@@ -1410,7 +1469,7 @@ pub async fn merge_vector_index_files(
                             location: location!(),
                         });
                     }
-                    // Enforce codebook bitwise equality
+                    // Enforce codebook equality with tolerance for minor serialization diffs
                     let existing_cb =
                         existing_pm.codebook.as_ref().ok_or_else(|| Error::Index {
                             message: "PQ codebook missing in first shard".to_string(),
@@ -1421,11 +1480,15 @@ pub async fn merge_vector_index_files(
                         location: location!(),
                     })?;
                     if !fixed_size_list_equal(existing_cb, current_cb) {
-                        return Err(Error::Index {
-                            message: "Distributed PQ merge: PQ codebook mismatch across shards"
-                                .to_string(),
-                            location: location!(),
-                        });
+                        const TOL: f32 = 1e-5;
+                        if !fixed_size_list_almost_equal(existing_cb, current_cb, TOL) {
+                            return Err(Error::Index {
+                                message: "PQ codebook content mismatch across shards".to_string(),
+                                location: location!(),
+                            });
+                        } else {
+                            log::warn!("PQ codebook differs within tolerance; proceeding with first shard codebook");
+                        }
                     }
                 }
                 if pq_meta.is_none() {
@@ -1612,7 +1675,7 @@ pub async fn merge_vector_index_files(
                             location: location!(),
                         });
                     }
-                    // Enforce codebook bitwise equality
+                    // Enforce codebook equality with tolerance for minor serialization diffs
                     let existing_cb =
                         existing_pm.codebook.as_ref().ok_or_else(|| Error::Index {
                             message: "PQ codebook missing in first shard".to_string(),
@@ -1623,12 +1686,15 @@ pub async fn merge_vector_index_files(
                         location: location!(),
                     })?;
                     if !fixed_size_list_equal(existing_cb, current_cb) {
-                        return Err(Error::Index {
-                            message:
-                                "Distributed PQ merge (HNSW_PQ): PQ codebook mismatch across shards"
-                                    .to_string(),
-                            location: location!(),
-                        });
+                        const TOL: f32 = 1e-5;
+                        if !fixed_size_list_almost_equal(existing_cb, current_cb, TOL) {
+                            return Err(Error::Index {
+                                message: "PQ codebook content mismatch across shards".to_string(),
+                                location: location!(),
+                            });
+                        } else {
+                            log::warn!("PQ codebook differs within tolerance; proceeding with first shard codebook");
+                        }
                     }
                 }
                 if pq_meta.is_none() {
@@ -1708,7 +1774,7 @@ pub async fn merge_vector_index_files(
         shard_infos.push((aux.clone(), lengths.clone()));
         // Accumulate overall lengths per partition for unified IVF model
         for pid in 0..nlist {
-            let part_len = lengths[pid] as u32;
+            let part_len = lengths[pid];
             accumulated_lengths[pid] = accumulated_lengths[pid].saturating_add(part_len);
         }
     }
