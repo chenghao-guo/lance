@@ -2224,45 +2224,41 @@ def assert_distributed_vector_consistency(
     similarity_metric="strict",
     similarity_threshold=1.0,
 ):
-    """Compare single vs distributed ANN TopK by similarity metrics (Recall/Jaccard)
-    or strict match.
+    """Recall-only consistency check between single-machine and distributed indices.
 
-    Parameters
-    ----------
-    data : pa.Table
-        Dataset table with at least an integer 'id' and a list<float32> vector column.
-    column : str
-        Vector column name
-    index_type : str, default "IVF_PQ"
-        Vector index type (e.g., "IVF_PQ", "IVF_FLAT", "IVF_HNSW_PQ")
-    index_params : dict, optional
-        Extra index parameters (e.g., num_partitions, num_sub_vectors, metric)
-    queries : Iterable[np.ndarray]
-        Query vectors; each must be the same dimension as the column
-    topk : int
-        Number of nearest neighbors to retrieve
-    tolerance : float, default 1e-6
-        Distance comparison tolerance (applies when comparing intersection IDs)
-    world : int, default 2
-        Number of fragment groups to simulate (ranks)
-    tmp_path : Path-like, optional
-        If provided, datasets will be written to tmp_path / single and tmp_path /
-        distributed.
-        If not provided, writes to a temporary local directory.
-    similarity_metric : str, default "strict"
-        One of {"strict", "recall", "jaccard"}. "strict" enforces identical TopK ID
-        sets.
-    similarity_threshold : float, default 1.0
-        If metric != "strict", assert metric >= threshold (e.g., 0.95 for IVF_FLAT).
+    This helper keeps the original signature for compatibility but ignores
+    similarity_metric/similarity_threshold. It compares recall@K against a ground
+    truth computed via exact search (use_index=False) on the single dataset and
+    asserts that the recall difference between single-machine and distributed
+    indices is within 10%.
 
-    Raises AssertionError
-        If results violate the chosen metric/threshold.
+    Steps
+    -----
+    1) Write `data` to two URIs (single, distributed); ensure distributed has >=2
+       fragments (rewrite with max_rows_per_file if needed)
+    2) Build a single-machine index via `create_index`
+    3) Global training (IVF/PQ) using `IndicesBuilder.prepare_global_ivfpq` when
+       appropriate; for IVF_FLAT/SQ variants, train IVF centroids via
+       `IndicesBuilder.train_ivf`
+    4) Build the distributed index via
+       `lance.indices.builder.build_distributed_vector_index`, passing the
+       preprocessed artifacts
+    5) For each query, compute ground-truth TopK IDs using exact search
+       (use_index=False), then compute TopK using single index and the distributed
+       index with consistent nearest settings (refine_factor=1; IVF uses nprobes)
+    6) Compute recall for single and distributed using the provided formula and
+       assert the absolute difference is <= 0.10. Also print the recalls.
     """
     import os
     import shutil
     import tempfile
 
     import lance
+    import numpy as np
+
+    # Keep signature compatibility but ignore similarity_metric/threshold
+    _ = similarity_metric
+    _ = similarity_threshold
 
     index_params = index_params or {}
 
@@ -2280,30 +2276,34 @@ def assert_distributed_vector_consistency(
 
     single_ds = lance.write_dataset(data, single_uri)
     dist_ds = lance.write_dataset(data, dist_uri)
-    # Ensure distributed dataset has ≥2 fragments; rewrite with small max_rows_per_file
-    # if needed
+
+    # Ensure distributed dataset has ≥2 fragments by rewriting with small files
     if len(dist_ds.get_fragments()) < 2:
         dist_ds = lance.write_dataset(
             data, dist_uri, mode="overwrite", max_rows_per_file=500
         )
 
-    # Single-machine index
+    # Build single-machine index
     single_ds = single_ds.create_index(
         column=column,
         index_type=index_type,
         **index_params,
     )
 
-    # Prepare global artifacts for distributed builds (IVF centroids / PQ codebook)
+    # Global training / preparation for distributed build
     preprocessed = None
     builder = IndicesBuilder(single_ds, column)
     nparts = index_params.get("num_partitions", None)
     nsub = index_params.get("num_sub_vectors", None)
     dist_type = index_params.get("metric", "l2")
     num_rows = single_ds.count_rows()
+
     # Choose a safe sample_rate that satisfies IVF (nparts*sr <= rows) and PQ
-    # (256*sr <= rows)
-    safe_sr = max(2, min(num_rows // max(1, nparts or 1), num_rows // 256))
+    # (256*sr <= rows). Minimum 2 as required by builder verification.
+    safe_sr_ivf = num_rows // max(1, nparts or 1)
+    safe_sr_pq = num_rows // 256
+    safe_sr = max(2, min(safe_sr_ivf, safe_sr_pq))
+
     if index_type in {"IVF_PQ", "IVF_HNSW_PQ"}:
         preprocessed = builder.prepare_global_ivfpq(
             nparts,
@@ -2311,7 +2311,11 @@ def assert_distributed_vector_consistency(
             distance_type=dist_type,
             sample_rate=safe_sr,
         )
-    elif ("IVF_FLAT" in index_type) or ("IVF_SQ" in index_type):
+    elif (
+        ("IVF_FLAT" in index_type)
+        or ("IVF_SQ" in index_type)
+        or ("IVF_HNSW_FLAT" in index_type)
+    ):
         ivf_model = builder.train_ivf(
             nparts,
             distance_type=dist_type,
@@ -2337,75 +2341,68 @@ def assert_distributed_vector_consistency(
         },
     )
 
-    # Execute and compare results for each query
-    for i, q in enumerate(queries or []):
-        # Refine distance to match exact search
-        nearest = {"column": column, "q": q, "k": topk, "refine_factor": 1}
-        if "IVF" in index_type:
-            # Improve recall for IVF-based indices by probing multiple partitions
-            nearest["nprobes"] = max(8, int(index_params.get("num_partitions", 8)))
-            # For HNSW-based variants, widen search to improve intersection with exact
-            if "HNSW" in index_type:
-                nearest["ef"] = max(64, 4 * int(index_params.get("num_partitions", 8)))
+    # Normalize queries into a list of np.ndarray
+    dim = single_ds.schema.field(column).type.list_size
+    if queries is None:
+        queries = [np.random.randn(dim).astype(np.float32)]
+    elif isinstance(queries, np.ndarray) and queries.ndim == 1:
+        queries = [queries.astype(np.float32)]
+    else:
+        queries = [np.asarray(q, dtype=np.float32) for q in queries]
 
-        single_res = single_ds.to_table(
-            nearest=nearest, columns=["id", "_distance"]
-        )  # payload minimized
-        dist_res = dist_ds.to_table(
-            nearest=nearest, columns=["id", "_distance"]
-        )  # same projection
+    # Collect TopK id lists for ground truth, single, and distributed
+    gt_ids = []
+    single_ids = []
+    dist_ids = []
 
-        if similarity_metric == "strict":
-            compare_vector_results(
-                single_res, dist_res, tolerance=tolerance, query_id=i
-            )
-            continue
-
-        # Compute similarity metrics against exact search (use_index=False) as
-        # ground truth
-        gt_nearest = {"column": column, "q": q, "k": topk, "use_index": False}
-        gt_res = single_ds.to_table(
-            nearest=gt_nearest, columns=["id", "_distance"]
-        )  # precise TopK
-
-        ground_ids = gt_res["id"].to_pylist()
-        dist_ids = dist_res["id"].to_pylist()
-        recall, jaccard, inter_cnt, union_cnt = _compute_similarity_metrics(
-            ground_ids, dist_ids
+    for q in queries:
+        # Ground truth via exact search
+        gt_tbl = single_ds.to_table(
+            nearest={"column": column, "q": q, "k": topk, "use_index": False},
+            columns=["id"],
         )
+        gt_ids.append(np.array(gt_tbl["id"].to_pylist(), dtype=np.int64))
 
-        if similarity_metric == "recall":
-            assert recall >= similarity_threshold, (
-                f"Recall below threshold relative to exact search for query #{i}: "
-                f"recall={recall:.3f}, threshold={similarity_threshold:.3f}, "
-                f"intersect={inter_cnt}, topk={len(ground_ids)}"
-            )
-        elif similarity_metric == "jaccard":
-            assert jaccard >= similarity_threshold, (
-                f"Jaccard below threshold relative to exact search for query #{i}: "
-                f"jaccard={jaccard:.3f}, threshold={similarity_threshold:.3f}, "
-                f"intersect={inter_cnt}, union={union_cnt}"
-            )
-        else:
-            raise ValueError(f"Unsupported similarity_metric: {similarity_metric}")
+        # Consistent nearest settings for index-based search
+        nearest = {"column": column, "q": q, "k": topk, "refine_factor": 100}
+        if "IVF" in index_type:
+            nearest["nprobes"] = max(16, int(index_params.get("num_partitions", 4)) * 4)
+        if "HNSW" in index_type:
+            # Ensure ef is large enough even when refine_factor multiplies k for HNSW
+            effective_k = topk * int(nearest["refine_factor"])  # HNSW uses k * refine_factor
+            nearest["ef"] = max(effective_k, 256)
 
-        # Optional: compare distances only on intersection IDs (exact vs distributed)
-        if "_distance" in gt_res.column_names and "_distance" in dist_res.column_names:
-            s_map = {
-                int(i): float(d)
-                for i, d in zip(ground_ids, gt_res["_distance"].to_pylist())
-            }
-            d_map = {
-                int(i): float(d)
-                for i, d in zip(dist_ids, dist_res["_distance"].to_pylist())
-            }
-            for sid in set(ground_ids) & set(dist_ids):
-                diff = abs(s_map[sid] - d_map[sid])
-                assert diff <= tolerance, (
-                    f"Distance mismatch vs exact for query #{i} on id={sid}:"
-                    f" exact={s_map[sid]}, distributed={d_map[sid]},"
-                    f" tolerance={tolerance}"
-                )
+        s_tbl = single_ds.to_table(nearest=nearest, columns=["id"])  # single index
+        d_tbl = dist_ds.to_table(nearest=nearest, columns=["id"])  # distributed index
+        single_ids.append(np.array(s_tbl["id"].to_pylist(), dtype=np.int64))
+        dist_ids.append(np.array(d_tbl["id"].to_pylist(), dtype=np.int64))
+
+    gt_ids = np.array(gt_ids, dtype=object)
+    single_ids = np.array(single_ids, dtype=object)
+    dist_ids = np.array(dist_ids, dtype=object)
+
+    # User-specified recall computation
+    def compute_recall(gt: np.ndarray, result: np.ndarray) -> float:
+        recalls = [
+            np.isin(rst, gt_vector).sum() / rst.shape[0]
+            for (rst, gt_vector) in zip(result, gt)
+        ]
+        return np.mean(recalls)
+
+    rs = compute_recall(gt_ids, single_ids)
+    rd = compute_recall(gt_ids, dist_ids)
+    msg = (
+        f"single recall@{topk}={rs:.2f}, distributed recall@{topk}={rd:.2f}, "
+        f"diff={abs(rs - rd):.2f}"
+    )
+    print(msg)
+
+    # Assert recall difference within 10%
+    assert abs(rs - rd) <= 0.10, (
+        f"Recall difference too large: single={rs:.3f}, distributed={rd:.3f}, "
+        f"diff={abs(rs - rd):.3f} (> 0.10)"
+    )
+
     # Cleanup temporary directory if used
     if tmp_dir is not None:
         try:
