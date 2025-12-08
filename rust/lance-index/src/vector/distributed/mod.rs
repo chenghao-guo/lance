@@ -3,8 +3,5 @@
 
 //! Distributed vector index building
 
-pub mod config;
 pub mod index_merger;
-
-pub use config::*;
 pub use index_merger::*;
