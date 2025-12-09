@@ -2369,7 +2369,9 @@ def assert_distributed_vector_consistency(
             nearest["nprobes"] = max(16, int(index_params.get("num_partitions", 4)) * 4)
         if "HNSW" in index_type:
             # Ensure ef is large enough even when refine_factor multiplies k for HNSW
-            effective_k = topk * int(nearest["refine_factor"])  # HNSW uses k * refine_factor
+            effective_k = topk * int(
+                nearest["refine_factor"]
+            )  # HNSW uses k * refine_factor
             nearest["ef"] = max(effective_k, 256)
 
         s_tbl = single_ds.to_table(nearest=nearest, columns=["id"])  # single index

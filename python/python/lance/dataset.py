@@ -2957,22 +2957,10 @@ class LanceDataset(pa.dataset.Dataset):
                 timers["ivf+pq_assign:end"] - timers["ivf+pq_assign:start"]
             )
             LOGGER.info("ivf+pq transform time: %ss", ivfpq_assign_time)
-
-            # IMPORTANT: For V3 index file version, avoid passing precomputed
-            # PQ shuffle buffers to prevent PQ codebook mismatch (Rust retrains
-            # quantizer and ignores provided codebook).
-            ver = (idx_ver_str or "V3").upper()
-            if ver == "LEGACY":
-                kwargs["precomputed_shuffle_buffers"] = shuffle_buffers
-                kwargs["precomputed_shuffle_buffers_path"] = os.path.join(
-                    shuffle_output_dir, "data"
-                )
-            else:
-                LOGGER.info(
-                    "IndexFileVersion=%s detected; skip precomputed shuffle "
-                    "buffers to stabilize IVF_PQ",
-                    ver,
-                )
+            kwargs["precomputed_shuffle_buffers"] = shuffle_buffers
+            kwargs["precomputed_shuffle_buffers_path"] = os.path.join(
+                shuffle_output_dir, "data"
+            )
         if index_type.startswith("IVF"):
             if (ivf_centroids is not None) and (ivf_centroids_file is not None):
                 raise ValueError(
