@@ -747,137 +747,8 @@ impl DatasetIndexExt for Dataset {
             });
         };
 
-        // Try to derive index type details/version by reading index files if present.
-        // This is especially important for distributed vector indices where only auxiliary.idx
-        // may exist after merge. If we detect any vector type, we will mark index_details and
-        // index_version so downstream code can avoid misclassifying as scalar.
-        let mut derived_details: Option<prost_types::Any> = None;
-        let mut derived_version: i32 = 0;
-        // index dir structure: <indices_root>/<uuid>/{index.idx|auxiliary.idx}
-        let index_root = self.indices_dir().child(index_id.to_string());
-        let index_file = index_root.child(lance_index::INDEX_FILE_NAME);
-        let aux_file = index_root.child(lance_index::INDEX_AUXILIARY_FILE_NAME);
-        // Helper: read INDEX_METADATA_SCHEMA_KEY from a lance file (v0.3+) to detect index type
-        async fn read_index_metadata_from_v3(
-            object_store: &lance_io::object_store::ObjectStore,
-            path: &object_store::path::Path,
-            metadata_cache: &crate::session::caches::DSMetadataCache,
-        ) -> crate::Result<Option<lance_index::IndexMetadata>> {
-            use lance_file::reader::FileReaderOptions;
-            use lance_index::INDEX_METADATA_SCHEMA_KEY as META_KEY;
-
-            if !object_store.exists(path).await.unwrap_or(false) {
-                return Ok(None);
-            }
-            // Open via ScanScheduler (required by FileReader::try_open)
-            let scheduler = ScanScheduler::new(
-                object_store.clone().into(),
-                SchedulerConfig::max_bandwidth(object_store),
-            );
-            let file = scheduler
-                .open_file(path, &CachedFileSize::unknown())
-                .await?;
-            let reader = lance_file::reader::FileReader::try_open(
-                file,
-                None,
-                Default::default(),
-                &metadata_cache.file_metadata_cache(path),
-                FileReaderOptions::default(),
-            )
-            .await?;
-            let meta_json = reader.schema().metadata.get(META_KEY).cloned();
-            if let Some(s) = meta_json {
-                let meta: lance_index::IndexMetadata = serde_json::from_str(&s)?;
-                Ok(Some(meta))
-            } else {
-                Ok(None)
-            }
-        }
-        // Helper: read INDEX_METADATA_SCHEMA_KEY from a previous lance file (v0.2)
-        async fn read_index_metadata_from_v2(
-            object_store: &lance_io::object_store::ObjectStore,
-            path: &object_store::path::Path,
-            metadata_cache: &crate::session::caches::DSMetadataCache,
-        ) -> crate::Result<Option<lance_index::IndexMetadata>> {
-            use lance_file::previous::reader::FileReader as PreviousFileReader;
-            use lance_index::INDEX_METADATA_SCHEMA_KEY as META_KEY;
-
-            if !object_store.exists(path).await.unwrap_or(false) {
-                return Ok(None);
-            }
-            let fh: Arc<dyn lance_io::traits::Reader> = object_store.open(path).await?.into();
-            let reader = PreviousFileReader::try_new_self_described_from_reader(
-                fh,
-                Some(&metadata_cache.file_metadata_cache(path)),
-            )
-            .await?;
-            let meta_json = reader.schema().metadata.get(META_KEY).cloned();
-            if let Some(s) = meta_json {
-                let meta: lance_index::IndexMetadata = serde_json::from_str(&s)?;
-                Ok(Some(meta))
-            } else {
-                Ok(None)
-            }
-        }
-        // Attempt reading from index.idx first (supports v0.1/0.2/0.3). For v0.1 we cannot
-        // derive type from schema; skip. For v0.2 and v0.3 we can.
-        // We will detect v2/v3 dynamically; for simplicity try v3 first then v2.
-        let mut detected_meta: Option<lance_index::IndexMetadata> = None;
-        if self.object_store.exists(&index_file).await.unwrap_or(false) {
-            // Try v3 reader
-            if let Ok(Some(m)) =
-                read_index_metadata_from_v3(&self.object_store, &index_file, &self.metadata_cache)
-                    .await
-            {
-                detected_meta = Some(m);
-            } else if let Ok(Some(m)) =
-                read_index_metadata_from_v2(&self.object_store, &index_file, &self.metadata_cache)
-                    .await
-            {
-                detected_meta = Some(m);
-            }
-        }
-        // If index.idx not available or no metadata, try auxiliary.idx (used in distributed merge)
-        if detected_meta.is_none() && self.object_store.exists(&aux_file).await.unwrap_or(false) {
-            if let Ok(Some(m)) =
-                read_index_metadata_from_v3(&self.object_store, &aux_file, &self.metadata_cache)
-                    .await
-            {
-                detected_meta = Some(m);
-            } else if let Ok(Some(m)) =
-                read_index_metadata_from_v2(&self.object_store, &aux_file, &self.metadata_cache)
-                    .await
-            {
-                detected_meta = Some(m);
-            }
-        }
-        if let Some(meta) = detected_meta.as_ref() {
-            if let Ok(index_type) = lance_index::IndexType::try_from(meta.index_type.as_str()) {
-                if index_type.is_vector() {
-                    derived_details = Some(vector_index_details());
-                    derived_version = lance_index::VECTOR_INDEX_VERSION as i32;
-                    tracing::info!(
-                        "commit_existing_index: inferred vector index type {} for {}",
-                        meta.index_type,
-                        index_id
-                    );
-                } else {
-                    tracing::info!(
-                        "commit_existing_index: inferred non-vector index type {} for {}",
-                        meta.index_type,
-                        index_id
-                    );
-                }
-            } else {
-                tracing::warn!(
-                    "commit_existing_index: unknown index_type string '{}' for {}",
-                    meta.index_type,
-                    index_id
-                );
-            }
-        } else {
-            tracing::warn!("commit_existing_index: unable to infer index metadata for {}; leaving index_details=None", index_id);
-        }
+        // TODO: We will need some way to determine the index details here.  Perhaps
+        // we can load the index itself and get the details that way.
 
         let new_idx = IndexMetadata {
             uuid: index_id,
@@ -885,8 +756,8 @@ impl DatasetIndexExt for Dataset {
             fields: vec![field.id],
             dataset_version: self.manifest.version,
             fragment_bitmap: Some(self.get_fragments().iter().map(|f| f.id() as u32).collect()),
-            index_details: derived_details.map(Arc::new),
-            index_version: derived_version,
+            index_details: None,
+            index_version: 0,
             created_at: Some(chrono::Utc::now()),
             base_id: None, // New indices don't have base_id (they're not from shallow clone)
         };
