@@ -119,6 +119,7 @@ async fn do_get_ivf_model(dataset: &Dataset, index_name: &str) -> PyResult<IvfMo
 
 #[pyfunction]
 fn get_pq_codebook(py: Python<'_>, dataset: &Dataset, index_name: &str) -> PyResult<PyObject> {
+    println!(" ------- get_pq_codebook ---------");
     fn err(msg: impl Into<String>) -> PyErr { PyValueError::new_err(msg.into()) }
     let indices = rt().block_on(Some(py), dataset.ds.load_indices())?.map_err(|e| err(e.to_string()))?;
     let idx = indices.iter().find(|i| i.name == index_name).ok_or_else(|| err(format!("Index \"{}\" not found", index_name)))?;
