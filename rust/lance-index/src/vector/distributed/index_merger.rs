@@ -489,7 +489,7 @@ pub async fn merge_vector_index_files(
     let mut accumulated_lengths: Vec<u32> = Vec::new();
     let mut first_centroids: Option<FixedSizeListArray> = None;
 
-    // Track per-shard IVF lengths to reorder writing by partition later
+    // Track per-shard IVF lengths to reorder writing to partitions later
     let mut shard_infos: Vec<(object_store::path::Path, Vec<u32>)> = Vec::new();
 
     // Iterate over each shard auxiliary file and merge its metadata and collect lengths
@@ -1229,4 +1229,257 @@ pub async fn merge_vector_index_files(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use arrow_array::{FixedSizeListArray, Float32Array, RecordBatch, UInt64Array};
+    use futures::StreamExt;
+    use lance_arrow::FixedSizeListArrayExt;
+    use lance_io::object_store::ObjectStore;
+    use lance_io::scheduler::{ScanScheduler, SchedulerConfig};
+    use lance_io::utils::CachedFileSize;
+    use lance_linalg::distance::DistanceType;
+    use object_store::path::Path;
+
+    async fn write_flat_partial_aux(
+        store: &ObjectStore,
+        aux_path: &Path,
+        dim: i32,
+        lengths: &[u32],
+        base_row_id: u64,
+        distance_type: DistanceType,
+    ) -> Result<usize> {
+        let arrow_schema = ArrowSchema::new(vec![
+            (*ROW_ID_FIELD).clone(),
+            Field::new(
+                crate::vector::flat::storage::FLAT_COLUMN,
+                DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float32, true)), dim),
+                true,
+            ),
+        ]);
+
+        let writer = store.create(aux_path).await?;
+        let mut v2w = V2Writer::try_new(
+            writer,
+            lance_core::datatypes::Schema::try_from(&arrow_schema)?,
+            V2WriterOptions::default(),
+        )?;
+
+        // Distance type metadata for this shard.
+        v2w.add_schema_metadata(DISTANCE_TYPE_KEY, distance_type.to_string());
+
+        // IVF metadata: only lengths are needed by the merger.
+        let ivf_meta = pb::Ivf {
+            centroids: Vec::new(),
+            offsets: Vec::new(),
+            lengths: lengths.to_vec(),
+            centroids_tensor: None,
+            loss: None,
+        };
+        let buf = Bytes::from(ivf_meta.encode_to_vec());
+        let pos = v2w.add_global_buffer(buf).await?;
+        v2w.add_schema_metadata(IVF_METADATA_KEY, pos.to_string());
+
+        // Build row ids and vectors grouped by partition so that ranges match lengths.
+        let total_rows: usize = lengths.iter().map(|v| *v as usize).sum();
+        let mut row_ids = Vec::with_capacity(total_rows);
+        let mut values = Vec::with_capacity(total_rows * dim as usize);
+
+        let mut current_row_id = base_row_id;
+        for (pid, len) in lengths.iter().enumerate() {
+            for _ in 0..*len {
+                row_ids.push(current_row_id);
+                current_row_id += 1;
+                for d in 0..dim {
+                    // Simple deterministic payload; only layout matters for merge.
+                    values.push(pid as f32 + d as f32 * 0.01);
+                }
+            }
+        }
+
+        let row_id_arr = UInt64Array::from(row_ids);
+        let value_arr = Float32Array::from(values);
+        let fsl = FixedSizeListArray::try_new_from_values(value_arr, dim).unwrap();
+        let batch = RecordBatch::try_new(
+            Arc::new(arrow_schema),
+            vec![Arc::new(row_id_arr), Arc::new(fsl)],
+        )
+        .unwrap();
+
+        v2w.write_batch(&batch).await?;
+        v2w.finish().await?;
+        Ok(total_rows)
+    }
+
+    #[tokio::test]
+    async fn test_merge_ivf_flat_success_basic() {
+        let object_store = ObjectStore::memory();
+        let index_dir = Path::from("index/uuid");
+
+        let partial0 = index_dir.child("partial_0");
+        let partial1 = index_dir.child("partial_1");
+        let aux0 = partial0.child(INDEX_AUXILIARY_FILE_NAME);
+        let aux1 = partial1.child(INDEX_AUXILIARY_FILE_NAME);
+
+        let lengths0 = vec![2_u32, 1_u32];
+        let lengths1 = vec![1_u32, 2_u32];
+        let dim = 2_i32;
+
+        write_flat_partial_aux(&object_store, &aux0, dim, &lengths0, 0, DistanceType::L2)
+            .await
+            .unwrap();
+        write_flat_partial_aux(&object_store, &aux1, dim, &lengths1, 100, DistanceType::L2)
+            .await
+            .unwrap();
+
+        merge_vector_index_files(&object_store, &index_dir)
+            .await
+            .unwrap();
+
+        let aux_out = index_dir.child(INDEX_AUXILIARY_FILE_NAME);
+        assert!(object_store.exists(&aux_out).await.unwrap());
+
+        // Use ScanScheduler to obtain a FileScheduler (required by V2Reader::try_open)
+        let sched = ScanScheduler::new(
+            Arc::new(object_store.clone()),
+            SchedulerConfig::max_bandwidth(&object_store),
+        );
+        let fh = sched
+            .open_file(&aux_out, &CachedFileSize::unknown())
+            .await
+            .unwrap();
+        let reader = V2Reader::try_open(
+            fh,
+            None,
+            Arc::default(),
+            &lance_core::cache::LanceCache::no_cache(),
+            V2ReaderOptions::default(),
+        )
+        .await
+        .unwrap();
+        let meta = reader.metadata();
+
+        // Validate IVF lengths aggregation.
+        let ivf_idx: u32 = meta
+            .file_schema
+            .metadata
+            .get(IVF_METADATA_KEY)
+            .unwrap()
+            .parse()
+            .unwrap();
+        let bytes = reader.read_global_buffer(ivf_idx).await.unwrap();
+        let pb_ivf: pb::Ivf = prost::Message::decode(bytes).unwrap();
+        let expected_lengths: Vec<u32> = lengths0
+            .iter()
+            .zip(lengths1.iter())
+            .map(|(a, b)| *a + *b)
+            .collect();
+        assert_eq!(pb_ivf.lengths, expected_lengths);
+
+        // Validate index metadata schema.
+        let idx_meta_json = meta
+            .file_schema
+            .metadata
+            .get(INDEX_METADATA_SCHEMA_KEY)
+            .unwrap();
+        let idx_meta: IndexMetaSchema = serde_json::from_str(idx_meta_json).unwrap();
+        assert_eq!(idx_meta.index_type, "IVF_FLAT");
+        assert_eq!(idx_meta.distance_type, DistanceType::L2.to_string());
+
+        // Validate total number of rows.
+        let mut total_rows = 0usize;
+        let mut stream = reader
+            .read_stream(
+                lance_io::ReadBatchParams::RangeFull,
+                u32::MAX,
+                4,
+                lance_encoding::decoder::FilterExpression::no_filter(),
+            )
+            .unwrap();
+        while let Some(batch) = stream.next().await {
+            total_rows += batch.unwrap().num_rows();
+        }
+        let expected_total: usize = expected_lengths.iter().map(|v| *v as usize).sum();
+        assert_eq!(total_rows, expected_total);
+    }
+
+    #[tokio::test]
+    async fn test_merge_distance_type_mismatch() {
+        let object_store = ObjectStore::memory();
+        let index_dir = Path::from("index/uuid");
+
+        let partial0 = index_dir.child("partial_0");
+        let partial1 = index_dir.child("partial_1");
+        let aux0 = partial0.child(INDEX_AUXILIARY_FILE_NAME);
+        let aux1 = partial1.child(INDEX_AUXILIARY_FILE_NAME);
+
+        let lengths = vec![2_u32, 2_u32];
+        let dim = 2_i32;
+
+        write_flat_partial_aux(&object_store, &aux0, dim, &lengths, 0, DistanceType::L2)
+            .await
+            .unwrap();
+        write_flat_partial_aux(
+            &object_store,
+            &aux1,
+            dim,
+            &lengths,
+            100,
+            DistanceType::Cosine,
+        )
+        .await
+        .unwrap();
+
+        let res = merge_vector_index_files(&object_store, &index_dir).await;
+        match res {
+            Err(Error::Index { message, .. }) => {
+                assert!(
+                    message.contains("Distance type mismatch"),
+                    "unexpected message: {}",
+                    message
+                );
+            }
+            other => panic!(
+                "expected Error::Index for distance type mismatch, got {:?}",
+                other
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_merge_rowid_overlap() {
+        let object_store = ObjectStore::memory();
+        let index_dir = Path::from("index/uuid");
+
+        let partial0 = index_dir.child("partial_0");
+        let partial1 = index_dir.child("partial_1");
+        let aux0 = partial0.child(INDEX_AUXILIARY_FILE_NAME);
+        let aux1 = partial1.child(INDEX_AUXILIARY_FILE_NAME);
+
+        let lengths = vec![2_u32, 2_u32];
+        let dim = 2_i32;
+
+        // Overlapping row id ranges: [0, 3] and [1, 4].
+        write_flat_partial_aux(&object_store, &aux0, dim, &lengths, 0, DistanceType::L2)
+            .await
+            .unwrap();
+        write_flat_partial_aux(&object_store, &aux1, dim, &lengths, 1, DistanceType::L2)
+            .await
+            .unwrap();
+
+        let res = merge_vector_index_files(&object_store, &index_dir).await;
+        match res {
+            Err(Error::Index { message, .. }) => {
+                assert!(
+                    message.contains("row id ranges overlap"),
+                    "unexpected message: {}",
+                    message
+                );
+            }
+            other => panic!("expected Error::Index for row id overlap, got {:?}", other),
+        }
+    }
 }
