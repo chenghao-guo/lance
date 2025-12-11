@@ -59,10 +59,10 @@ use lance::index::vector::utils::get_vector_type;
 use lance::index::{vector::VectorIndexParams, DatasetIndexInternalExt};
 use lance::{dataset::builder::DatasetBuilder, index::vector::IndexFileVersion};
 use lance_arrow::as_fixed_size_list_array;
+use lance_core::cache::LanceCache;
 use lance_core::Error;
 use lance_datafusion::utils::reader_to_stream;
 use lance_encoding::decoder::DecoderConfig;
-use lance_core::cache::LanceCache;
 use lance_file::reader::{FileReader as V2Reader, FileReaderOptions};
 use lance_file::writer::{FileWriter as V2Writer, FileWriterOptions as V2WriterOptions};
 use lance_index::scalar::inverted::query::{
@@ -2063,7 +2063,8 @@ impl Dataset {
                     .await
                 }
                 // Precise vector index types: IVF_FLAT, IVF_PQ, IVF_SQ, IVF_HNSW_FLAT, IVF_HNSW_PQ, IVF_HNSW_SQ
-                "IVF_FLAT" | "IVF_PQ" | "IVF_SQ" | "IVF_HNSW_FLAT" | "IVF_HNSW_PQ" | "IVF_HNSW_SQ" | "VECTOR" => {
+                "IVF_FLAT" | "IVF_PQ" | "IVF_SQ" | "IVF_HNSW_FLAT" | "IVF_HNSW_PQ"
+                | "IVF_HNSW_SQ" | "VECTOR" => {
                     // Merge distributed vector index partials into unified auxiliary.idx
                     lance_index::vector::distributed::index_merger::merge_vector_index_files(
                         self.ds.object_store(),
@@ -2074,7 +2075,7 @@ impl Dataset {
                     let aux_path = index_dir.child(INDEX_AUXILIARY_FILE_NAME);
                     let scheduler = ScanScheduler::new(
                         Arc::new(self.ds.object_store().clone()),
-                        SchedulerConfig::max_bandwidth(&self.ds.object_store()),
+                        SchedulerConfig::max_bandwidth(self.ds.object_store()),
                     );
                     let fh = scheduler
                         .open_file(&aux_path, &CachedFileSize::unknown())
@@ -2151,9 +2152,8 @@ impl Dataset {
                     );
 
                     // Determine number of partitions from IVF metadata (needed for both HNSW and FLAT-based variants)
-                    let pb_ivf: lance_index::pb::Ivf = prost::Message::decode(
-                        aux_reader.read_global_buffer(ivf_buf_idx).await?,
-                    )?;
+                    let pb_ivf: lance_index::pb::Ivf =
+                        prost::Message::decode(aux_reader.read_global_buffer(ivf_buf_idx).await?)?;
                     let ivf_model: IvfStorageModel = IvfStorageModel::try_from(pb_ivf)?;
                     let nlist = ivf_model.num_partitions();
 
