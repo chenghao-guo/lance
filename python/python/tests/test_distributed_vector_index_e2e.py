@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright The Lance Authors
 
+import shutil
 import uuid
 from pathlib import Path
 from typing import Optional
@@ -22,6 +23,17 @@ def _make_sample_dataset(tmp_path: Path, n_rows: int = 2000, dim: int = 128):
     vectors = pa.array(mat.tolist(), type=pa.list_(pa.float32(), dim))
     table = pa.table({"id": ids, "vector": vectors})
     return lance.write_dataset(table, tmp_path / "dist_e2e", max_rows_per_file=256)
+
+
+def _copy_dataset_to_tmp(ds, tmp_path: Path, suffix: str):
+    """Copy the dataset directory to a new location and reopen it.
+
+    This is used to build single-node index baselines on identical data.
+    """
+    src = Path(ds.uri)
+    dst = tmp_path / f"{src.name}_{suffix}"
+    shutil.copytree(src, dst)
+    return lance.dataset(dst)
 
 
 def _split_fragments_two_groups(ds):
@@ -114,6 +126,18 @@ def test_e2e_distributed_ivf_pq_recall(tmp_path: Path):
 
     num_partitions = 4
     num_sub_vectors = 16
+
+    # Build a single-node IVF_PQ index on a copied dataset as the baseline.
+    # Copy the dataset before any distributed index is created to avoid
+    # pre-existing index state and name clashes.
+    baseline_ds = _copy_dataset_to_tmp(ds, tmp_path, suffix="ivf_pq_single")
+    baseline_ds = baseline_ds.create_index(
+        "vector",
+        index_type="IVF_PQ",
+        num_partitions=num_partitions,
+        num_sub_vectors=num_sub_vectors,
+    )
+
     builder = IndicesBuilder(ds, "vector")
     num_rows = ds.count_rows()
     sample_rate = _safe_sample_rate(num_rows, num_partitions)
@@ -151,13 +175,30 @@ def test_e2e_distributed_ivf_pq_recall(tmp_path: Path):
         raise
 
     queries = _sample_queries(ds, 10, column="vector")
-    recall = _average_recall(ds, queries, k=10)
-    assert recall >= 0.90
+    distributed_recall = _average_recall(ds, queries, k=10)
+    baseline_recall = _average_recall(baseline_ds, queries, k=10)
+
+    # Allow a small relative gap to account for training randomness across nodes.
+    assert distributed_recall >= baseline_recall * 0.95
 
 
 def test_e2e_distributed_ivf_flat_recall(tmp_path: Path):
     ds = _make_sample_dataset(tmp_path, n_rows=2000, dim=128)
     node1, node2 = _split_fragments_two_groups(ds)
+
+    num_partitions = 4
+    num_sub_vectors = 128
+
+    # Build a single-node IVF_FLAT index on a copied dataset as the baseline.
+    # Copy the dataset before any distributed index is created to avoid
+    # pre-existing index state and name clashes.
+    baseline_ds = _copy_dataset_to_tmp(ds, tmp_path, suffix="ivf_flat_single")
+    baseline_ds = baseline_ds.create_index(
+        "vector",
+        index_type="IVF_FLAT",
+        num_partitions=num_partitions,
+        num_sub_vectors=num_sub_vectors,
+    )
 
     shared_uuid = str(uuid.uuid4())
 
@@ -167,13 +208,17 @@ def test_e2e_distributed_ivf_flat_recall(tmp_path: Path):
             index_type="IVF_FLAT",
             fragment_ids=shard,
             index_uuid=shared_uuid,
-            num_partitions=4,
-            num_sub_vectors=128,
+            num_partitions=num_partitions,
+            num_sub_vectors=num_sub_vectors,
         )
 
     ds.merge_index_metadata(shared_uuid, "IVF_FLAT")
     ds = _commit_index_helper(ds, shared_uuid, column="vector")
 
     queries = _sample_queries(ds, 10, column="vector")
-    recall = _average_recall(ds, queries, k=10)
-    assert recall >= 0.98
+    distributed_recall = _average_recall(ds, queries, k=10)
+    baseline_recall = _average_recall(baseline_ds, queries, k=10)
+
+    # IVF_FLAT should match the single-node baseline very closely, so we only
+    # allow up to a 1% relative recall drop.
+    assert distributed_recall >= baseline_recall * 0.99
