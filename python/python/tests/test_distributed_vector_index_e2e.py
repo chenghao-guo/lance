@@ -50,10 +50,10 @@ def _split_fragments_two_groups(ds):
 
 
 def _commit_index_helper(
-    ds,
-    index_uuid: str,
-    column: str = "vector",
-    index_name: Optional[str] = None,
+        ds,
+        index_uuid: str,
+        column: str = "vector",
+        index_name: Optional[str] = None,
 ):
     """Finalize index commit after merge_index_metadata.
 
@@ -127,6 +127,9 @@ def test_e2e_distributed_ivf_pq_recall(tmp_path: Path):
     num_partitions = 4
     num_sub_vectors = 16
 
+    num_rows = ds.count_rows()
+    sample_rate = _safe_sample_rate(num_rows, num_partitions)
+
     # Build a single-node IVF_PQ index on a copied dataset as the baseline.
     # Copy the dataset before any distributed index is created to avoid
     # pre-existing index state and name clashes.
@@ -136,11 +139,10 @@ def test_e2e_distributed_ivf_pq_recall(tmp_path: Path):
         index_type="IVF_PQ",
         num_partitions=num_partitions,
         num_sub_vectors=num_sub_vectors,
+        sample_rate=sample_rate,
     )
 
     builder = IndicesBuilder(ds, "vector")
-    num_rows = ds.count_rows()
-    sample_rate = _safe_sample_rate(num_rows, num_partitions)
 
     pre = builder.prepare_global_ivfpq(
         num_partitions=num_partitions,
