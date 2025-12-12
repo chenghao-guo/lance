@@ -50,10 +50,10 @@ def _split_fragments_two_groups(ds):
 
 
 def _commit_index_helper(
-        ds,
-        index_uuid: str,
-        column: str = "vector",
-        index_name: Optional[str] = None,
+    ds,
+    index_uuid: str,
+    column: str = "vector",
+    index_name: Optional[str] = None,
 ):
     """Finalize index commit after merge_index_metadata.
 
@@ -84,10 +84,18 @@ def _commit_index_helper(
 
 
 def _safe_sample_rate(num_rows: int, num_partitions: int) -> int:
-    """Compute a sample_rate valid for both IVF and PQ training."""
-    safe_sr_ivf = num_rows // max(1, num_partitions)
+    """Compute a sample_rate that is PQ-friendly for global training.
+
+    This value is passed as `sample_rate` to the builder, which now
+    decouples IVF and PQ sampling internally. Here we focus on ensuring
+    enough samples per PQ codeword, and let IVF infer its own sampling
+    rate from dataset statistics.
+    """
+    # Focus on PQ constraints: need roughly 256 * sample_rate rows for
+    # robust codebook training. IVF sampling is derived inside the
+    # builder from dataset size and num_partitions.
     safe_sr_pq = num_rows // 256
-    return max(2, min(safe_sr_ivf, safe_sr_pq))
+    return max(2, safe_sr_pq)
 
 
 def _sample_queries(ds, num_queries: int, column: str = "vector"):
@@ -110,8 +118,8 @@ def _average_recall(ds, queries, k: int) -> float:
                 "column": "vector",
                 "q": q,
                 "k": k,
-                "nprobes": 16,
-                "refine_factor": 100,
+                "nprobes": 64,
+                "refine_factor": 200,
             },
         )
         gt_ids = set(int(x) for x in gt["id"].to_pylist())
@@ -127,9 +135,6 @@ def test_e2e_distributed_ivf_pq_recall(tmp_path: Path):
     num_partitions = 4
     num_sub_vectors = 16
 
-    num_rows = ds.count_rows()
-    sample_rate = _safe_sample_rate(num_rows, num_partitions)
-
     # Build a single-node IVF_PQ index on a copied dataset as the baseline.
     # Copy the dataset before any distributed index is created to avoid
     # pre-existing index state and name clashes.
@@ -139,10 +144,11 @@ def test_e2e_distributed_ivf_pq_recall(tmp_path: Path):
         index_type="IVF_PQ",
         num_partitions=num_partitions,
         num_sub_vectors=num_sub_vectors,
-        sample_rate=sample_rate,
     )
 
     builder = IndicesBuilder(ds, "vector")
+    num_rows = ds.count_rows()
+    sample_rate = _safe_sample_rate(num_rows, num_partitions)
 
     pre = builder.prepare_global_ivfpq(
         num_partitions=num_partitions,
