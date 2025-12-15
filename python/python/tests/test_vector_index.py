@@ -2,9 +2,12 @@
 # SPDX-FileCopyrightText: Copyright The Lance Authors
 
 import logging
+import os
 import platform
 import random
+import shutil
 import string
+import tempfile
 import time
 import uuid as uuid
 from pathlib import Path
@@ -2164,13 +2167,6 @@ def assert_distributed_vector_consistency(
     6) Compute recall for single and distributed using the provided formula and
        assert the absolute difference is <= 0.10. Also print the recalls.
     """
-    import os
-    import shutil
-    import tempfile
-
-    import lance
-    import numpy as np
-
     # Keep signature compatibility but ignore similarity_metric/threshold
     _ = similarity_metric
     _ = similarity_threshold
@@ -2315,11 +2311,6 @@ def assert_distributed_vector_consistency(
 
     rs = compute_recall(gt_ids, single_ids)
     rd = compute_recall(gt_ids, dist_ids)
-    msg = (
-        f"single recall@{topk}={rs:.2f}, distributed recall@{topk}={rd:.2f}, "
-        f"diff={abs(rs - rd):.2f}"
-    )
-    print(msg)
 
     # Assert recall difference within 10%
     assert abs(rs - rd) <= 0.10, (

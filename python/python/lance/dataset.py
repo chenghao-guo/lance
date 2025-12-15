@@ -2962,6 +2962,7 @@ class LanceDataset(pa.dataset.Dataset):
                 timers["ivf+pq_assign:end"] - timers["ivf+pq_assign:start"]
             )
             LOGGER.info("ivf+pq transform time: %ss", ivfpq_assign_time)
+
             kwargs["precomputed_shuffle_buffers"] = shuffle_buffers
             kwargs["precomputed_shuffle_buffers_path"] = os.path.join(
                 shuffle_output_dir, "data"
@@ -3029,6 +3030,7 @@ class LanceDataset(pa.dataset.Dataset):
                 )
 
             if ivf_centroids is not None:
+                # User provided IVF centroids
                 if _check_for_numpy(ivf_centroids) and isinstance(
                     ivf_centroids, np.ndarray
                 ):
@@ -3042,8 +3044,8 @@ class LanceDataset(pa.dataset.Dataset):
                         )
                     if ivf_centroids.dtype not in [np.float16, np.float32, np.float64]:
                         raise TypeError(
-                            f"IVF centroids must be floating number, "
-                            f"got {ivf_centroids.dtype}"
+                            "IVF centroids must be floating number"
+                            + f"got {ivf_centroids.dtype}"
                         )
                     dim = ivf_centroids.shape[1]
                     values = pa.array(ivf_centroids.reshape(-1))

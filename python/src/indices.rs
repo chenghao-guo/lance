@@ -119,7 +119,6 @@ async fn do_get_ivf_model(dataset: &Dataset, index_name: &str) -> PyResult<IvfMo
 
 #[pyfunction]
 fn get_pq_codebook(py: Python<'_>, dataset: &Dataset, index_name: &str) -> PyResult<PyObject> {
-    println!(" ------- get_pq_codebook ---------");
     fn err(msg: impl Into<String>) -> PyErr {
         PyValueError::new_err(msg.into())
     }
