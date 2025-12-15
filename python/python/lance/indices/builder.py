@@ -657,66 +657,66 @@ def _commit_index_helper(
     return ds
 
 
-def build_distributed_vector_index(
-    dataset,
-    column,
-    *,
-    index_type: str = "IVF_PQ",
-    num_partitions: Optional[int] = None,
-    num_sub_vectors: Optional[int] = None,
-    world: int = 2,
-    preprocessed_data: Optional[dict] = None,
-    **index_params,
-):
-    """
-    Build a distributed vector index over fragment groups and commit.
-
-    Steps:
-    - Partition fragments into `world` groups
-    - For each group, call create_index with fragment_ids and a shared index_uuid
-    - Optionally pass preprocessed ivf_centroids/pq_codebook
-    - Merge metadata (commit index manifest)
-
-    Returns the dataset (post-merge) for querying.
-    """
-    import uuid as _uuid
-
-    frags = dataset.get_fragments()
-    frag_ids = [f.fragment_id for f in frags]
-    groups = _split_fragments_evenly(frag_ids, world)
-    shared_uuid = str(_uuid.uuid4())
-
-    # Prepare kwargs for preprocessed artifacts if provided
-    extra_kwargs = {}
-    if preprocessed_data is not None:
-        if (
-            "ivf_centroids" in preprocessed_data
-            and preprocessed_data["ivf_centroids"] is not None
-        ):
-            extra_kwargs["ivf_centroids"] = preprocessed_data["ivf_centroids"]
-        if (
-            "pq_codebook" in preprocessed_data
-            and preprocessed_data["pq_codebook"] is not None
-        ):
-            extra_kwargs["pq_codebook"] = preprocessed_data["pq_codebook"]
-
-    for g in groups:
-        if not g:
-            continue
-        dataset.create_index(
-            column=column,
-            index_type=index_type,
-            fragment_ids=g,
-            index_uuid=shared_uuid,
-            num_partitions=num_partitions,
-            num_sub_vectors=num_sub_vectors,
-            **extra_kwargs,
-            **index_params,
-        )
-
-    # Merge physical index metadata and commit manifest for the concrete index_type
-    # Bypass Python wrapper restriction (which allows only scalar types) by calling the
-    # underlying Dataset binding directly and pass batch_readhead=None.
-    dataset._ds.merge_index_metadata(shared_uuid, index_type, None)
-    dataset = _commit_index_helper(dataset, shared_uuid, column=column)
-    return dataset
+# def build_distributed_vector_index(
+#     dataset,
+#     column,
+#     *,
+#     index_type: str = "IVF_PQ",
+#     num_partitions: Optional[int] = None,
+#     num_sub_vectors: Optional[int] = None,
+#     world: int = 2,
+#     preprocessed_data: Optional[dict] = None,
+#     **index_params,
+# ):
+#     """
+#     Build a distributed vector index over fragment groups and commit.
+#
+#     Steps:
+#     - Partition fragments into `world` groups
+#     - For each group, call create_index with fragment_ids and a shared index_uuid
+#     - Optionally pass preprocessed ivf_centroids/pq_codebook
+#     - Merge metadata (commit index manifest)
+#
+#     Returns the dataset (post-merge) for querying.
+#     """
+#     import uuid as _uuid
+#
+#     frags = dataset.get_fragments()
+#     frag_ids = [f.fragment_id for f in frags]
+#     groups = _split_fragments_evenly(frag_ids, world)
+#     shared_uuid = str(_uuid.uuid4())
+#
+#     # Prepare kwargs for preprocessed artifacts if provided
+#     extra_kwargs = {}
+#     if preprocessed_data is not None:
+#         if (
+#             "ivf_centroids" in preprocessed_data
+#             and preprocessed_data["ivf_centroids"] is not None
+#         ):
+#             extra_kwargs["ivf_centroids"] = preprocessed_data["ivf_centroids"]
+#         if (
+#             "pq_codebook" in preprocessed_data
+#             and preprocessed_data["pq_codebook"] is not None
+#         ):
+#             extra_kwargs["pq_codebook"] = preprocessed_data["pq_codebook"]
+#
+#     for g in groups:
+#         if not g:
+#             continue
+#         dataset.create_index(
+#             column=column,
+#             index_type=index_type,
+#             fragment_ids=g,
+#             index_uuid=shared_uuid,
+#             num_partitions=num_partitions,
+#             num_sub_vectors=num_sub_vectors,
+#             **extra_kwargs,
+#             **index_params,
+#         )
+#
+#     # Merge physical index metadata and commit manifest for the concrete index_type
+#     # Bypass Python wrapper restriction (which allows only scalar types) by calling
+#     # the underlying Dataset binding directly and pass batch_readhead=None.
+#     dataset._ds.merge_index_metadata(shared_uuid, index_type, None)
+#     dataset = _commit_index_helper(dataset, shared_uuid, column=column)
+#     return dataset
