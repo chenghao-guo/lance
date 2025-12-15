@@ -2324,21 +2324,28 @@ def assert_distributed_vector_consistency(
         preprocessed = {"ivf_centroids": ivf_model.centroids}
 
     # Distributed build + merge
-    from lance.indices.builder import build_distributed_vector_index as _build_dist
+    extra = {
+        k: v
+        for k, v in index_params.items()
+        if k not in {"num_partitions", "num_sub_vectors"}
+    }
+    if preprocessed is not None:
+        if (
+            "ivf_centroids" in preprocessed
+            and preprocessed["ivf_centroids"] is not None
+        ):
+            extra["ivf_centroids"] = preprocessed["ivf_centroids"]
+        if "pq_codebook" in preprocessed and preprocessed["pq_codebook"] is not None:
+            extra["pq_codebook"] = preprocessed["pq_codebook"]
 
-    dist_ds = _build_dist(
+    dist_ds = build_distributed_vector_index(
         dist_ds,
         column,
         index_type=index_type,
         num_partitions=index_params.get("num_partitions", None),
         num_sub_vectors=index_params.get("num_sub_vectors", None),
         world=world,
-        preprocessed_data=preprocessed,
-        **{
-            k: v
-            for k, v in index_params.items()
-            if k not in {"num_partitions", "num_sub_vectors"}
-        },
+        **extra,
     )
 
     # Normalize queries into a list of np.ndarray
