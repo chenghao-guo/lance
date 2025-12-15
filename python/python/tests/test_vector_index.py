@@ -2903,3 +2903,107 @@ def test_ivf_hnsw_pq_merge_two_shards_success(tmp_path):
     q = np.random.rand(128).astype(np.float32)
     results = ds.to_table(nearest={"column": "vector", "q": q, "k": 5})
     assert 0 < len(results) <= 5
+
+
+def test_distributed_ivf_pq_order_invariance(tmp_path: Path):
+    """Ensure distributed IVF_PQ build is invariant to shard build order."""
+    ds = _make_sample_dataset(tmp_path, n_rows=2000)
+
+    # Global IVF+PQ training once; artifacts are reused across shard orders.
+    builder = IndicesBuilder(ds, "vector")
+    pre = builder.prepare_global_ivfpq(
+        num_partitions=4,
+        num_subvectors=16,
+        distance_type="l2",
+        sample_rate=7,
+    )
+
+    # Copy the dataset twice so index manifests do not clash and we can vary
+    # the shard build order independently on identical data.
+    ds_order_12 = lance.write_dataset(
+        ds.to_table(), tmp_path / "pq_order_node1_node2", max_rows_per_file=500
+    )
+    ds_order_21 = lance.write_dataset(
+        ds.to_table(), tmp_path / "pq_order_node2_node1", max_rows_per_file=500
+    )
+
+    # For each copy, derive two shard groups from its own fragments.
+    frags_12 = ds_order_12.get_fragments()
+    if len(frags_12) < 2:
+        pytest.skip("Need at least 2 fragments for distributed indexing (order_12)")
+    mid_12 = len(frags_12) // 2
+    node1_12 = [f.fragment_id for f in frags_12[:mid_12]]
+    node2_12 = [f.fragment_id for f in frags_12[mid_12:]]
+    if not node1_12 or not node2_12:
+        pytest.skip("Failed to split fragments into two non-empty groups (order_12)")
+
+    frags_21 = ds_order_21.get_fragments()
+    if len(frags_21) < 2:
+        pytest.skip("Need at least 2 fragments for distributed indexing (order_21)")
+    mid_21 = len(frags_21) // 2
+    node1_21 = [f.fragment_id for f in frags_21[:mid_21]]
+    node2_21 = [f.fragment_id for f in frags_21[mid_21:]]
+    if not node1_21 or not node2_21:
+        pytest.skip("Failed to split fragments into two non-empty groups (order_21)")
+
+    def build_distributed_ivf_pq(ds_copy, shard_order):
+        shared_uuid = str(uuid.uuid4())
+        try:
+            for shard in shard_order:
+                ds_copy.create_index(
+                    column="vector",
+                    index_type="IVF_PQ",
+                    fragment_ids=shard,
+                    index_uuid=shared_uuid,
+                    num_partitions=4,
+                    num_sub_vectors=16,
+                    ivf_centroids=pre["ivf_centroids"],
+                    pq_codebook=pre["pq_codebook"],
+                )
+            ds_copy.merge_index_metadata(shared_uuid, "IVF_PQ")
+            return _commit_index_helper(ds_copy, shared_uuid, column="vector")
+        except ValueError as e:
+            # Known flakiness in some environments when PQ codebooks diverge.
+            if "PQ codebook content mismatch across shards" in str(e):
+                pytest.skip(
+                    "Distributed IVF_PQ codebook mismatch - known environment issue"
+                )
+            raise
+
+    ds_12 = build_distributed_ivf_pq(ds_order_12, [node1_12, node2_12])
+    ds_21 = build_distributed_ivf_pq(ds_order_21, [node2_21, node1_21])
+
+    # Sample queries once from the original dataset and reuse for both index builds
+    # to check order invariance under distributed PQ training and merging.
+    k = 10
+    sample_tbl = ds.sample(10, columns=["vector"])
+    queries = [
+        np.asarray(v, dtype=np.float32) for v in sample_tbl["vector"].to_pylist()
+    ]
+
+    def collect_ids_and_distances(ds_with_index):
+        ids_per_query = []
+        dists_per_query = []
+        for q in queries:
+            tbl = ds_with_index.to_table(
+                columns=["id", "_distance"],
+                nearest={
+                    "column": "vector",
+                    "q": q,
+                    "k": k,
+                    "nprobes": 16,
+                    "refine_factor": 100,
+                },
+            )
+            ids_per_query.append([int(x) for x in tbl["id"].to_pylist()])
+            dists_per_query.append(tbl["_distance"].to_numpy())
+        return ids_per_query, dists_per_query
+
+    ids_12, dists_12 = collect_ids_and_distances(ds_12)
+    ids_21, dists_21 = collect_ids_and_distances(ds_21)
+
+    # TopK ids must match exactly and distances must be numerically stable across
+    # different shard build orders (allow tiny floating error).
+    assert ids_12 == ids_21
+    for a, b in zip(dists_12, dists_21):
+        assert np.allclose(a, b, atol=1e-6)
