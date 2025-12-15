@@ -8,46 +8,7 @@ use arrow_array::cast::AsArray;
 use arrow_array::{Array, FixedSizeListArray};
 use lance_core::{Error, Result, ROW_ID_FIELD};
 use snafu::location;
-use std::collections::HashMap;
 use std::sync::Arc;
-
-/// Statistics for a single partition in the vector index
-///
-/// Contains metrics about vector distribution, quality, and performance characteristics
-/// for a specific partition within the distributed index.
-#[derive(Debug, Clone)]
-pub struct PartitionStats {
-    /// Unique identifier for this partition
-    pub partition_id: usize,
-    /// Total number of vectors in this partition
-    pub vector_count: usize,
-    /// Distribution of vectors across fragments (fragment_id -> vector_count)
-    pub fragment_distribution: HashMap<usize, usize>,
-    /// Quality score for the partition centroid (0.0 to 1.0)
-    pub centroid_quality: f64,
-    /// Average distance from vectors in this partition to their centroid
-    pub avg_distance_to_centroid: f64,
-}
-
-/// Global statistics
-#[derive(Debug, Clone)]
-pub struct GlobalStats {
-    pub total_vectors: usize,
-    pub total_partitions: usize,
-    pub total_fragments: usize,
-    pub avg_partition_size: f64,
-    pub partition_balance_score: f64,
-    pub overall_quality_score: f64,
-}
-
-/// Fragment mapping
-#[derive(Debug, Clone)]
-pub struct FragmentMapping {
-    pub fragment_id: usize,
-    pub original_path: String,
-    pub vector_count: usize,
-    pub partition_distribution: HashMap<usize, usize>, // partition_id -> vector_count
-}
 
 /// Strict bitwise equality check for FixedSizeListArray values.
 /// Returns true only if length, value_length and all underlying primitive values are equal.
