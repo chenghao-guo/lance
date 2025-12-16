@@ -9,7 +9,7 @@ import shutil
 import string
 import tempfile
 import time
-import uuid as uuid
+import uuid
 from pathlib import Path
 from typing import Optional
 
@@ -19,7 +19,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pytest
 from lance import LanceDataset, LanceFragment
-from lance.dataset import VectorIndexReader
+from lance.dataset import Index, VectorIndexReader
 from lance.indices import IndexFileVersion, IndicesBuilder
 from lance.util import validate_vector_index  # noqa: E402
 from lance.vector import vec_to_table  # noqa: E402
@@ -2120,7 +2120,6 @@ def build_distributed_vector_index(
 
     Returns the dataset (post-merge) for querying.
     """
-    import uuid
 
     frags = dataset.get_fragments()
     frag_ids = [f.fragment_id for f in frags]
@@ -2878,8 +2877,6 @@ def _commit_index_helper(
     Builds a lance.dataset.Index record and commits a CreateIndex operation.
     Returns the updated dataset object.
     """
-    import lance
-    from lance.dataset import Index
 
     # Resolve field id for the target column
     lance_field = ds.lance_schema.field(column)

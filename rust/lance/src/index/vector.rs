@@ -63,6 +63,12 @@ use uuid::Uuid;
 use super::{pb, vector_index_details, DatasetIndexInternalExt, IndexParams};
 use crate::dataset::transaction::{Operation, Transaction};
 use crate::{dataset::Dataset, index::pb::vector_index_stage::Stage, Error, Result};
+use arrow_schema::{Field, Schema as ArrowSchema};
+use lance_file::reader::FileReaderOptions;
+use lance_file::writer::FileWriterOptions;
+use lance_io::scheduler::{ScanScheduler, SchedulerConfig};
+use lance_io::utils::CachedFileSize;
+use pb::Tensor as PbTensor;
 
 pub const LANCE_VECTOR_INDEX: &str = "__lance_vector_index";
 
@@ -386,10 +392,6 @@ pub(crate) async fn build_distributed_vector_index(
                     .await
                     .unwrap_or(false)
                 {
-                    use lance_file::reader::FileReaderOptions;
-                    use lance_io::scheduler::{ScanScheduler, SchedulerConfig};
-                    use lance_io::utils::CachedFileSize;
-                    use pb::Tensor as PbTensor;
                     let scheduler = ScanScheduler::new(
                         std::sync::Arc::new(dataset.object_store().clone()),
                         SchedulerConfig::max_bandwidth(dataset.object_store()),
@@ -433,8 +435,6 @@ pub(crate) async fn build_distributed_vector_index(
                     )
                     .await?;
                     // Persist trained centroids under out_base/global_training.idx
-                    use arrow_schema::{Field, Schema as ArrowSchema};
-                    use lance_file::writer::FileWriterOptions;
                     let arrow_schema = ArrowSchema::new(vec![Field::new(
                         "_ivf_centroids",
                         DataType::FixedSizeList(
@@ -2152,8 +2152,11 @@ mod tests {
     use crate::dataset::Dataset;
     use arrow_array::types::{Float32Type, Int32Type};
     use arrow_array::Array;
+    use arrow_array::RecordBatch;
+    use arrow_schema::{DataType as ArrowDataType, Field, Schema as ArrowSchema};
     use lance_core::utils::tempfile::TempStrDir;
     use lance_datagen::{array, BatchCount, RowCount};
+    use lance_file::writer::FileWriterOptions;
     use lance_index::metrics::NoOpMetricsCollector;
     use lance_index::DatasetIndexExt;
     use lance_linalg::distance::MetricType;
@@ -2677,10 +2680,6 @@ mod tests {
         // `lance:global_ivf_centroids` metadata key.
         let out_base = dataset.indices_dir().child(&*uuid);
         let training_path = out_base.child("global_training.idx");
-
-        use arrow_array::RecordBatch;
-        use arrow_schema::{DataType as ArrowDataType, Field, Schema as ArrowSchema};
-        use lance_file::writer::FileWriterOptions;
 
         let writer = dataset.object_store().create(&training_path).await.unwrap();
         let arrow_schema = ArrowSchema::new(vec![Field::new("dummy", ArrowDataType::Int32, true)]);
