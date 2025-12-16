@@ -1193,7 +1193,7 @@ pub async fn merge_vector_index_files(
 mod tests {
     use super::*;
 
-    use arrow_array::{FixedSizeListArray, Float32Array, RecordBatch, UInt64Array};
+    use arrow_array::{FixedSizeListArray, Float32Array, RecordBatch, UInt64Array, UInt8Array};
     use futures::StreamExt;
     use lance_arrow::FixedSizeListArrayExt;
     use lance_io::object_store::ObjectStore;
@@ -1439,5 +1439,234 @@ mod tests {
             }
             other => panic!("expected Error::Index for row id overlap, got {:?}", other),
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn write_pq_partial_aux(
+        store: &ObjectStore,
+        aux_path: &Path,
+        nbits: u32,
+        num_sub_vectors: usize,
+        dimension: usize,
+        lengths: &[u32],
+        base_row_id: u64,
+        distance_type: DistanceType,
+        codebook: &FixedSizeListArray,
+    ) -> Result<usize> {
+        let num_bytes = if nbits == 4 {
+            // Two 4-bit codes per byte.
+            num_sub_vectors / 2
+        } else {
+            num_sub_vectors
+        };
+
+        let arrow_schema = ArrowSchema::new(vec![
+            (*ROW_ID_FIELD).clone(),
+            Field::new(
+                crate::vector::PQ_CODE_COLUMN,
+                DataType::FixedSizeList(
+                    Arc::new(Field::new("item", DataType::UInt8, true)),
+                    num_bytes as i32,
+                ),
+                true,
+            ),
+        ]);
+
+        let writer = store.create(aux_path).await?;
+        let mut v2w = V2Writer::try_new(
+            writer,
+            lance_core::datatypes::Schema::try_from(&arrow_schema)?,
+            V2WriterOptions::default(),
+        )?;
+
+        // Distance type metadata for this shard.
+        v2w.add_schema_metadata(DISTANCE_TYPE_KEY, distance_type.to_string());
+
+        // PQ metadata with codebook stored in a global buffer.
+        let mut pq_meta = ProductQuantizationMetadata {
+            codebook_position: 0,
+            nbits,
+            num_sub_vectors,
+            dimension,
+            codebook: Some(codebook.clone()),
+            codebook_tensor: Vec::new(),
+            transposed: true,
+        };
+
+        let codebook_tensor: pb::Tensor = pb::Tensor::try_from(codebook)?;
+        let codebook_buf = Bytes::from(codebook_tensor.encode_to_vec());
+        let codebook_pos = v2w.add_global_buffer(codebook_buf).await?;
+        pq_meta.codebook_position = codebook_pos as usize;
+
+        let pq_meta_json = serde_json::to_string(&pq_meta)?;
+        v2w.add_schema_metadata(PQ_METADATA_KEY, pq_meta_json);
+
+        // IVF metadata: only lengths are needed by the merger.
+        let ivf_meta = pb::Ivf {
+            centroids: Vec::new(),
+            offsets: Vec::new(),
+            lengths: lengths.to_vec(),
+            centroids_tensor: None,
+            loss: None,
+        };
+        let buf = Bytes::from(ivf_meta.encode_to_vec());
+        let ivf_pos = v2w.add_global_buffer(buf).await?;
+        v2w.add_schema_metadata(IVF_METADATA_KEY, ivf_pos.to_string());
+
+        // Build row ids and PQ codes grouped by partition so that ranges match lengths.
+        let total_rows: usize = lengths.iter().map(|v| *v as usize).sum();
+        let mut row_ids = Vec::with_capacity(total_rows);
+        let mut codes = Vec::with_capacity(total_rows * num_bytes);
+
+        let mut current_row_id = base_row_id;
+        for (pid, len) in lengths.iter().enumerate() {
+            for _ in 0..*len {
+                row_ids.push(current_row_id);
+                current_row_id += 1;
+                for b in 0..num_bytes {
+                    // Simple deterministic payload; merge only cares about layout.
+                    codes.push((pid + b) as u8);
+                }
+            }
+        }
+
+        let row_id_arr = UInt64Array::from(row_ids);
+        let codes_arr = UInt8Array::from(codes);
+        let codes_fsl =
+            FixedSizeListArray::try_new_from_values(codes_arr, num_bytes as i32).unwrap();
+        let batch = RecordBatch::try_new(
+            Arc::new(arrow_schema),
+            vec![Arc::new(row_id_arr), Arc::new(codes_fsl)],
+        )
+        .unwrap();
+
+        v2w.write_batch(&batch).await?;
+        v2w.finish().await?;
+        Ok(total_rows)
+    }
+
+    #[tokio::test]
+    async fn test_merge_ivf_pq_success() {
+        let object_store = ObjectStore::memory();
+        let index_dir = Path::from("index/uuid_pq");
+
+        let partial0 = index_dir.child("partial_0");
+        let partial1 = index_dir.child("partial_1");
+        let aux0 = partial0.child(INDEX_AUXILIARY_FILE_NAME);
+        let aux1 = partial1.child(INDEX_AUXILIARY_FILE_NAME);
+
+        let lengths0 = vec![2_u32, 1_u32];
+        let lengths1 = vec![1_u32, 2_u32];
+
+        // PQ parameters.
+        let nbits = 4_u32;
+        let num_sub_vectors = 2_usize;
+        let dimension = 8_usize;
+
+        // Deterministic PQ codebook shared by both shards.
+        let num_centroids = 1_usize << nbits;
+        let num_codebook_vectors = num_centroids * num_sub_vectors;
+        let total_values = num_codebook_vectors * dimension;
+        let values = Float32Array::from_iter((0..total_values).map(|v| v as f32));
+        let codebook = FixedSizeListArray::try_new_from_values(values, dimension as i32).unwrap();
+
+        // Non-overlapping row id ranges across shards.
+        write_pq_partial_aux(
+            &object_store,
+            &aux0,
+            nbits,
+            num_sub_vectors,
+            dimension,
+            &lengths0,
+            0,
+            DistanceType::L2,
+            &codebook,
+        )
+        .await
+        .unwrap();
+
+        write_pq_partial_aux(
+            &object_store,
+            &aux1,
+            nbits,
+            num_sub_vectors,
+            dimension,
+            &lengths1,
+            1_000,
+            DistanceType::L2,
+            &codebook,
+        )
+        .await
+        .unwrap();
+
+        // Merge PQ auxiliary files.
+        merge_vector_index_files(&object_store, &index_dir)
+            .await
+            .unwrap();
+
+        // 3) Unified auxiliary file exists.
+        let aux_out = index_dir.child(INDEX_AUXILIARY_FILE_NAME);
+        assert!(object_store.exists(&aux_out).await.unwrap());
+
+        // Open merged auxiliary file.
+        let sched = ScanScheduler::new(
+            Arc::new(object_store.clone()),
+            SchedulerConfig::max_bandwidth(&object_store),
+        );
+        let fh = sched
+            .open_file(&aux_out, &CachedFileSize::unknown())
+            .await
+            .unwrap();
+        let reader = V2Reader::try_open(
+            fh,
+            None,
+            Arc::default(),
+            &lance_core::cache::LanceCache::no_cache(),
+            V2ReaderOptions::default(),
+        )
+        .await
+        .unwrap();
+        let meta = reader.metadata();
+
+        // 4) Unified IVF metadata lengths equal shard-wise sums.
+        let ivf_idx: u32 = meta
+            .file_schema
+            .metadata
+            .get(IVF_METADATA_KEY)
+            .unwrap()
+            .parse()
+            .unwrap();
+        let bytes = reader.read_global_buffer(ivf_idx).await.unwrap();
+        let pb_ivf: pb::Ivf = prost::Message::decode(bytes).unwrap();
+        let expected_lengths: Vec<u32> = lengths0
+            .iter()
+            .zip(lengths1.iter())
+            .map(|(a, b)| *a + *b)
+            .collect();
+        assert_eq!(pb_ivf.lengths, expected_lengths);
+
+        // 5) Index metadata schema reports IVF_PQ and correct distance type.
+        let idx_meta_json = meta
+            .file_schema
+            .metadata
+            .get(INDEX_METADATA_SCHEMA_KEY)
+            .unwrap();
+        let idx_meta: IndexMetaSchema = serde_json::from_str(idx_meta_json).unwrap();
+        assert_eq!(idx_meta.index_type, "IVF_PQ");
+        assert_eq!(idx_meta.distance_type, DistanceType::L2.to_string());
+
+        // 6) PQ metadata and codebook are preserved.
+        let pq_meta_json = meta.file_schema.metadata.get(PQ_METADATA_KEY).unwrap();
+        let pq_meta: ProductQuantizationMetadata = serde_json::from_str(pq_meta_json).unwrap();
+        assert_eq!(pq_meta.nbits, nbits);
+        assert_eq!(pq_meta.num_sub_vectors, num_sub_vectors);
+        assert_eq!(pq_meta.dimension, dimension);
+
+        let codebook_pos = pq_meta.codebook_position as u32;
+        let cb_bytes = reader.read_global_buffer(codebook_pos).await.unwrap();
+        let cb_tensor: pb::Tensor = prost::Message::decode(cb_bytes).unwrap();
+        let merged_codebook = FixedSizeListArray::try_from(&cb_tensor).unwrap();
+
+        assert!(fixed_size_list_equal(&codebook, &merged_codebook));
     }
 }
