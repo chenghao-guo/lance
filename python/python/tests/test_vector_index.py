@@ -2416,15 +2416,28 @@ def assert_distributed_vector_consistency(
 # =============================================================================
 
 
-def _make_sample_dataset_preprocessed(
-    tmp_path: Path, n_rows: int = 1000, dim: int = 128
+def _make_sample_dataset_base(
+    tmp_path: Path,
+    name: str,
+    n_rows: int = 1000,
+    dim: int = 128,
+    max_rows_per_file: int = 500,
 ):
-    """Create a dataset with an integer 'id' and list<float32> 'vector' column."""
+    """Common helper to construct sample datasets for distributed index tests."""
     mat = np.random.rand(n_rows, dim).astype(np.float32)
     ids = np.arange(n_rows)
     arr = pa.array(mat.tolist(), type=pa.list_(pa.float32(), dim))
     tbl = pa.table({"id": ids, "vector": arr})
-    return lance.write_dataset(tbl, tmp_path / "preproc_ds", max_rows_per_file=500)
+    return lance.write_dataset(
+        tbl, tmp_path / name, max_rows_per_file=max_rows_per_file
+    )
+
+
+def _make_sample_dataset_preprocessed(
+    tmp_path: Path, n_rows: int = 1000, dim: int = 128
+):
+    """Create a dataset with an integer 'id' and list<float32> 'vector' column."""
+    return _make_sample_dataset_base(tmp_path, "preproc_ds", n_rows, dim)
 
 
 def test_prepared_global_ivfpq_distributed_merge_and_search(tmp_path: Path):
@@ -2537,11 +2550,7 @@ def _make_sample_dataset(tmp_path, n_rows: int = 1000, dim: int = 128):
     """Create a dataset with an integer 'id' and list<float32> 'vector' column.
     Reuse the project style and avoid extra dependencies.
     """
-    mat = np.random.rand(n_rows, dim).astype(np.float32)
-    ids = np.arange(n_rows)
-    arr = pa.array(mat.tolist(), type=pa.list_(pa.float32(), dim))
-    tbl = pa.table({"id": ids, "vector": arr})
-    return lance.write_dataset(tbl, tmp_path / "dist_ds", max_rows_per_file=500)
+    return _make_sample_dataset_base(tmp_path, "dist_ds", n_rows, dim)
 
 
 def test_distributed_api_basic_success(tmp_path):
@@ -2893,15 +2902,8 @@ def _commit_index_helper(
 
 
 def _make_sample_dataset_distributed(tmp_path, n_rows: int = 1000, dim: int = 128):
-    mat = np.random.rand(n_rows, dim).astype(np.float32)
-    ids = np.arange(n_rows)
-    arr = pa.array(mat.tolist(), type=pa.list_(pa.float32(), dim))
     # Ensure at least 2 fragments by limiting rows per file
-    return lance.write_dataset(
-        pa.table({"id": ids, "vector": arr}),
-        tmp_path / "dist_ds2",
-        max_rows_per_file=500,
-    )
+    return _make_sample_dataset_base(tmp_path, "dist_ds2", n_rows, dim)
 
 
 def test_ivf_pq_merge_two_shards_success(tmp_path):
