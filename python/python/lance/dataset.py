@@ -3181,19 +3181,31 @@ class LanceDataset(pa.dataset.Dataset):
         batch_readhead: Optional[int] = None,
     ):
         """
-        Merge index metadata only for VECTOR/BTREE/INVERTED.
+        Merge distributed index metadata for supported scalar
+        and vector index types.
+
+        This method supports all index types defined in
+        :class:`lance.indices.SupportedDistributedIndices`,
+        including scalar indices
+        (``BTREE``, ``INVERTED``) and precise vector index types
+        such as ``IVF_FLAT``, ``IVF_PQ``, ``IVF_SQ``, ``IVF_HNSW_FLAT``,
+        ``IVF_HNSW_PQ``, and ``IVF_HNSW_SQ``.
+
         This method does NOT commit changes.
 
         This API merges temporary index files (e.g., per-fragment partials).
-        After this method returns, callers MUST explicitly commit the index manifest
-        using lance.LanceDataset.commit(...) with a LanceOperation.CreateIndex.
+        After this method returns, callers MUST explicitly commit
+        the index manifest using lance.LanceDataset.commit(...)
+        with a LanceOperation.CreateIndex.
 
         Parameters
         ----------
         index_uuid : str
             The shared UUID used when building fragment-level indices.
         index_type : str
-            One of enum defined in SupportedDistributedIndices.
+            Index type name. Must be one of the enum values in
+            :class:`lance.indices.SupportedDistributedIndices`
+            (for example ``"IVF_PQ"``).
         batch_readhead : int, optional
             Prefetch concurrency used by BTREE merge reader. Default: 1.
         """
