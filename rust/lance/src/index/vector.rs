@@ -2570,6 +2570,166 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_build_distributed_invalid_fragment_ids() {
+        let test_dir = TempStrDir::default();
+        let uri = format!("{}/ds", test_dir.as_str());
+
+        let reader = lance_datagen::gen_batch()
+            .col("id", array::step::<Int32Type>())
+            .col("vector", array::rand_vec::<Float32Type>(32.into()))
+            .into_reader_rows(RowCount::from(128), BatchCount::from(1));
+        let dataset = Dataset::write(reader, &uri, None).await.unwrap();
+
+        let fragments = dataset.fragments();
+        assert!(
+            !fragments.is_empty(),
+            "Dataset should have at least one fragment"
+        );
+        let max_id = fragments.iter().map(|f| f.id as u32).max().unwrap();
+        let invalid_id = max_id + 1000;
+
+        let params = VectorIndexParams::ivf_flat(4, MetricType::L2);
+        let uuid = Uuid::new_v4().to_string();
+
+        let result = build_distributed_vector_index(
+            &dataset,
+            "vector",
+            "vector_ivf_flat_dist",
+            &uuid,
+            &params,
+            None,
+            &[invalid_id],
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "Expected Ok for invalid fragment ids, got {:?}",
+            result
+        );
+
+        // Ensure that global training file is persisted even when fragment_ids are invalid.
+        let out_base = dataset.indices_dir().child(&*uuid);
+        let training_path = out_base.child("global_training.idx");
+        assert!(
+            dataset.object_store().exists(&training_path).await.unwrap(),
+            "Expected global training file to exist at {:?}",
+            training_path
+        );
+    }
+
+    #[tokio::test]
+    async fn test_build_distributed_empty_fragment_ids() {
+        let test_dir = TempStrDir::default();
+        let uri = format!("{}/ds", test_dir.as_str());
+
+        let reader = lance_datagen::gen_batch()
+            .col("id", array::step::<Int32Type>())
+            .col("vector", array::rand_vec::<Float32Type>(32.into()))
+            .into_reader_rows(RowCount::from(128), BatchCount::from(1));
+        let dataset = Dataset::write(reader, &uri, None).await.unwrap();
+
+        let params = VectorIndexParams::ivf_flat(4, MetricType::L2);
+        let uuid = Uuid::new_v4().to_string();
+
+        let result = build_distributed_vector_index(
+            &dataset,
+            "vector",
+            "vector_ivf_flat_dist",
+            &uuid,
+            &params,
+            None,
+            &[],
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "Expected Ok for empty fragment ids, got {:?}",
+            result
+        );
+
+        // Ensure that global training file is persisted even when fragment_ids are empty.
+        let out_base = dataset.indices_dir().child(&*uuid);
+        let training_path = out_base.child("global_training.idx");
+        assert!(
+            dataset.object_store().exists(&training_path).await.unwrap(),
+            "Expected global training file to exist at {:?}",
+            training_path
+        );
+    }
+
+    #[tokio::test]
+    async fn test_build_distributed_training_metadata_missing() {
+        let test_dir = TempStrDir::default();
+        let uri = format!("{}/ds", test_dir.as_str());
+
+        let reader = lance_datagen::gen_batch()
+            .col("id", array::step::<Int32Type>())
+            .col("vector", array::rand_vec::<Float32Type>(32.into()))
+            .into_reader_rows(RowCount::from(128), BatchCount::from(1));
+        let dataset = Dataset::write(reader, &uri, None).await.unwrap();
+
+        let params = VectorIndexParams::ivf_flat(4, MetricType::L2);
+        let uuid = Uuid::new_v4().to_string();
+
+        // Pre-create a malformed global training file that is missing the
+        // `lance:global_ivf_centroids` metadata key.
+        let out_base = dataset.indices_dir().child(&*uuid);
+        let training_path = out_base.child("global_training.idx");
+
+        use arrow_array::RecordBatch;
+        use arrow_schema::{DataType as ArrowDataType, Field, Schema as ArrowSchema};
+        use lance_file::writer::FileWriterOptions;
+
+        let writer = dataset.object_store().create(&training_path).await.unwrap();
+        let arrow_schema = ArrowSchema::new(vec![Field::new("dummy", ArrowDataType::Int32, true)]);
+        let mut v2w = lance_file::writer::FileWriter::try_new(
+            writer,
+            lance_core::datatypes::Schema::try_from(&arrow_schema).unwrap(),
+            FileWriterOptions::default(),
+        )
+        .unwrap();
+        let empty_batch = RecordBatch::new_empty(Arc::new(arrow_schema));
+        v2w.write_batch(&empty_batch).await.unwrap();
+        v2w.finish().await.unwrap();
+
+        let fragments = dataset.fragments();
+        assert!(
+            !fragments.is_empty(),
+            "Dataset should have at least one fragment"
+        );
+        let valid_id = fragments[0].id as u32;
+
+        let result = build_distributed_vector_index(
+            &dataset,
+            "vector",
+            "vector_ivf_flat_dist",
+            &uuid,
+            &params,
+            None,
+            &[valid_id],
+        )
+        .await;
+
+        match result {
+            Err(Error::Index { message, .. }) => {
+                assert!(
+                    message.contains("Global IVF training metadata missing")
+                        || message.contains("Global IVF buffer index parse error"),
+                    "Unexpected error message: {}",
+                    message
+                );
+            }
+            Ok(_) => panic!("Expected Error::Index when IVF training metadata is missing, got Ok"),
+            Err(e) => panic!(
+                "Expected Error::Index when IVF training metadata is missing, got {:?}",
+                e
+            ),
+        }
+    }
+
+    #[tokio::test]
     async fn test_initialize_vector_index_empty_dataset() {
         let test_dir = TempStrDir::default();
         let source_uri = format!("{}/source", test_dir.as_str());
