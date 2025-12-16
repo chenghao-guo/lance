@@ -1669,4 +1669,150 @@ mod tests {
 
         assert!(fixed_size_list_equal(&codebook, &merged_codebook));
     }
+
+    #[tokio::test]
+    async fn test_merge_ivf_pq_codebook_mismatch() {
+        let object_store = ObjectStore::memory();
+        let index_dir = Path::from("index/uuid_pq_mismatch");
+
+        let partial0 = index_dir.child("partial_0");
+        let partial1 = index_dir.child("partial_1");
+        let aux0 = partial0.child(INDEX_AUXILIARY_FILE_NAME);
+        let aux1 = partial1.child(INDEX_AUXILIARY_FILE_NAME);
+
+        let lengths0 = vec![2_u32, 1_u32];
+        let lengths1 = vec![1_u32, 2_u32];
+
+        // PQ parameters.
+        let nbits = 4_u32;
+        let num_sub_vectors = 2_usize;
+        let dimension = 8_usize;
+
+        // Base PQ codebook for shard 0.
+        let num_centroids = 1_usize << nbits;
+        let num_codebook_vectors = num_centroids * num_sub_vectors;
+        let total_values = num_codebook_vectors * dimension;
+        let values0 = Float32Array::from_iter((0..total_values).map(|v| v as f32));
+        let codebook0 = FixedSizeListArray::try_new_from_values(values0, dimension as i32).unwrap();
+
+        // Different PQ codebook for shard 1 with values shifted beyond tolerance.
+        let values1 = Float32Array::from_iter((0..total_values).map(|v| v as f32 + 1.0));
+        let codebook1 = FixedSizeListArray::try_new_from_values(values1, dimension as i32).unwrap();
+
+        // Non-overlapping row id ranges across shards.
+        write_pq_partial_aux(
+            &object_store,
+            &aux0,
+            nbits,
+            num_sub_vectors,
+            dimension,
+            &lengths0,
+            0,
+            DistanceType::L2,
+            &codebook0,
+        )
+        .await
+        .unwrap();
+
+        write_pq_partial_aux(
+            &object_store,
+            &aux1,
+            nbits,
+            num_sub_vectors,
+            dimension,
+            &lengths1,
+            1_000,
+            DistanceType::L2,
+            &codebook1,
+        )
+        .await
+        .unwrap();
+
+        let res = merge_vector_index_files(&object_store, &index_dir).await;
+        match res {
+            Err(Error::Index { message, .. }) => {
+                assert!(
+                    message.contains("PQ codebook content mismatch"),
+                    "unexpected message: {}",
+                    message
+                );
+            }
+            other => panic!(
+                "expected Error::Index with PQ codebook content mismatch, got {:?}",
+                other
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_merge_ivf_pq_num_sub_vectors_mismatch() {
+        let object_store = ObjectStore::memory();
+        let index_dir = Path::from("index/uuid_pq_mismatch_m");
+
+        let partial0 = index_dir.child("partial_0");
+        let partial1 = index_dir.child("partial_1");
+        let aux0 = partial0.child(INDEX_AUXILIARY_FILE_NAME);
+        let aux1 = partial1.child(INDEX_AUXILIARY_FILE_NAME);
+
+        let lengths0 = vec![2_u32, 1_u32];
+        let lengths1 = vec![1_u32, 2_u32];
+
+        // PQ parameters: same nbits and dimension, different num_sub_vectors.
+        let nbits = 4_u32;
+        let dimension = 8_usize;
+        let num_sub_vectors0 = 4_usize;
+        let num_sub_vectors1 = 2_usize;
+
+        // Deterministic PQ codebook shared by both shards.
+        let num_centroids = 1_usize << nbits;
+        let num_codebook_vectors = num_centroids * num_sub_vectors0.max(num_sub_vectors1);
+        let total_values = num_codebook_vectors * dimension;
+        let values = Float32Array::from_iter((0..total_values).map(|v| v as f32));
+        let codebook = FixedSizeListArray::try_new_from_values(values, dimension as i32).unwrap();
+
+        // Shard 0: num_sub_vectors = 4.
+        write_pq_partial_aux(
+            &object_store,
+            &aux0,
+            nbits,
+            num_sub_vectors0,
+            dimension,
+            &lengths0,
+            0,
+            DistanceType::L2,
+            &codebook,
+        )
+        .await
+        .unwrap();
+
+        // Shard 1: num_sub_vectors = 2 (structural mismatch).
+        write_pq_partial_aux(
+            &object_store,
+            &aux1,
+            nbits,
+            num_sub_vectors1,
+            dimension,
+            &lengths1,
+            10_000,
+            DistanceType::L2,
+            &codebook,
+        )
+        .await
+        .unwrap();
+
+        let res = merge_vector_index_files(&object_store, &index_dir).await;
+        match res {
+            Err(Error::Index { message, .. }) => {
+                assert!(
+                    message.contains("structural mismatch"),
+                    "unexpected message: {}",
+                    message
+                );
+            }
+            other => panic!(
+                "expected Error::Index for PQ num_sub_vectors mismatch, got {:?}",
+                other
+            ),
+        }
+    }
 }
