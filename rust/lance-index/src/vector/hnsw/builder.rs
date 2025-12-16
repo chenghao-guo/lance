@@ -891,7 +891,7 @@ impl IvfSubIndex for HNSW {
 mod tests {
     use std::sync::Arc;
 
-    use arrow_array::FixedSizeListArray;
+    use arrow_array::{FixedSizeListArray, Float32Array, UInt64Array};
     use arrow_schema::Schema;
     use lance_arrow::FixedSizeListArrayExt;
     use lance_file::previous::{
@@ -907,7 +907,10 @@ mod tests {
     use lance_testing::datagen::generate_random_array;
     use object_store::path::Path;
 
+    use crate::metrics::NoOpMetricsCollector;
+    use crate::prefilter::NoFilter;
     use crate::scalar::IndexWriter;
+    use crate::vector::storage::{DistCalculator, VectorStore};
     use crate::vector::v3::subindex::IvfSubIndex;
     use crate::vector::{
         flat::storage::FlatFloatStorage,
@@ -978,5 +981,71 @@ mod tests {
             .search_basic(query, k, &params, None, store.as_ref())
             .unwrap();
         assert_eq!(builder_results, loaded_results);
+    }
+
+    #[test]
+    fn test_empty_hnsw_fallback_matches_flat_search() {
+        const DIM: usize = 16;
+        const TOTAL: usize = 256;
+        const K: usize = 10;
+
+        let data = generate_random_array(TOTAL * DIM);
+        let fsl = FixedSizeListArray::try_new_from_values(data, DIM as i32).unwrap();
+        let store = Arc::new(FlatFloatStorage::new(fsl.clone(), DistanceType::L2));
+
+        let hnsw = HNSW::empty();
+        assert!(hnsw.is_empty());
+
+        let query = fsl.value(0);
+        let params = HnswQueryParams {
+            ef: 2 * K,
+            lower_bound: None,
+            upper_bound: None,
+            dist_q_c: 0.0,
+        };
+
+        let prefilter = Arc::new(NoFilter);
+        let metrics = NoOpMetricsCollector;
+
+        let result = hnsw
+            .search(
+                query.clone(),
+                K,
+                params,
+                store.as_ref(),
+                prefilter,
+                &metrics,
+            )
+            .unwrap();
+
+        let distances_array = result
+            .column(0)
+            .as_any()
+            .downcast_ref::<Float32Array>()
+            .unwrap();
+        let row_ids_array = result
+            .column(1)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap();
+
+        assert_eq!(distances_array.len(), K);
+        assert_eq!(row_ids_array.len(), K);
+
+        let dist_calc = store.dist_calculator(query, params.dist_q_c);
+        let mut expected: Vec<(u64, f32)> = (0..store.len() as u32)
+            .map(|id| (store.row_id(id), dist_calc.distance(id)))
+            .collect();
+        expected.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+
+        let expected = &expected[..K];
+        let expected_row_ids: Vec<u64> = expected.iter().map(|(row_id, _)| *row_id).collect();
+        let expected_dists: Vec<f32> = expected.iter().map(|(_, dist)| *dist).collect();
+
+        let actual_row_ids: Vec<u64> = row_ids_array.values().to_vec();
+        let actual_dists: Vec<f32> = distances_array.values().to_vec();
+
+        assert_eq!(actual_row_ids, expected_row_ids);
+        assert_eq!(actual_dists, expected_dists);
     }
 }
