@@ -361,4 +361,37 @@ mod tests {
         assert_eq!(first_vals.value(0), 1.0);
         assert_eq!(first_vals.value(1), 2.0);
     }
+
+    #[test]
+    fn test_find_partitions_fallback_centroids_none() {
+        let mut ivf = IvfModel::empty();
+        ivf.add_partition(10);
+        ivf.add_partition(20);
+        ivf.add_partition(30);
+
+        assert_eq!(ivf.num_partitions(), 3);
+        assert!(ivf.centroids.is_none());
+
+        let query = Float32Array::from(vec![1.0_f32, 2.0_f32]);
+
+        // nprobes less than number of partitions
+        let (part_ids_2, dists_2) = ivf.find_partitions(&query, 2, DistanceType::L2).unwrap();
+        assert_eq!(part_ids_2.len(), 2);
+        assert_eq!(dists_2.len(), 2);
+        assert_eq!(part_ids_2.value(0), 0);
+        assert_eq!(part_ids_2.value(1), 1);
+        assert_eq!(dists_2.value(0), 0.0);
+        assert_eq!(dists_2.value(1), 0.0);
+
+        // nprobes greater than number of partitions
+        let (part_ids_5, dists_5) = ivf.find_partitions(&query, 5, DistanceType::L2).unwrap();
+        assert_eq!(part_ids_5.len(), 3);
+        assert_eq!(dists_5.len(), 3);
+        assert_eq!(part_ids_5.value(0), 0);
+        assert_eq!(part_ids_5.value(1), 1);
+        assert_eq!(part_ids_5.value(2), 2);
+        assert_eq!(dists_5.value(0), 0.0);
+        assert_eq!(dists_5.value(1), 0.0);
+        assert_eq!(dists_5.value(2), 0.0);
+    }
 }
