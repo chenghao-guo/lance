@@ -19,6 +19,7 @@ use std::cmp::min;
 use std::collections::{BinaryHeap, HashMap, VecDeque};
 use std::fmt::Debug;
 use std::iter;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::RwLock;
 use tracing::instrument;
@@ -306,10 +307,10 @@ impl HNSW {
             .inner
             .level_count
             .iter()
-            .chain(iter::once(&0usize))
-            .scan(0usize, |state, &count| {
+            .chain(iter::once(&AtomicUsize::new(0)))
+            .scan(0, |state, x| {
                 let start = *state;
-                *state += count;
+                *state += x.load(Ordering::Relaxed);
                 Some(start)
             })
             .collect();
@@ -326,7 +327,7 @@ struct HnswBuilder {
     params: HnswBuildParams,
 
     nodes: Arc<Vec<RwLock<GraphBuilderNode>>>,
-    level_count: Vec<usize>,
+    level_count: Vec<AtomicUsize>,
 
     entry_point: u32,
 
@@ -348,7 +349,7 @@ impl HnswBuilder {
     }
 
     fn num_nodes(&self, level: usize) -> usize {
-        self.level_count[level]
+        self.level_count[level].load(Ordering::Relaxed)
     }
 
     fn nodes(&self) -> Arc<Vec<RwLock<GraphBuilderNode>>> {
@@ -360,7 +361,9 @@ impl HnswBuilder {
         let len = storage.len();
         let max_level = params.max_level;
 
-        let level_count = vec![0usize; max_level as usize];
+        let level_count = (0..max_level)
+            .map(|_| AtomicUsize::new(0))
+            .collect::<Vec<_>>();
 
         let visited_generator_queue = Arc::new(ArrayQueue::new(get_num_compute_intensive_cpus()));
         for _ in 0..get_num_compute_intensive_cpus() {
@@ -442,6 +445,8 @@ impl HnswBuilder {
         {
             let mut current_node = nodes[node as usize].write().unwrap();
             for level in (0..=target_level).rev() {
+                self.level_count[level as usize].fetch_add(1, Ordering::Relaxed);
+
                 let neighbors = self.search_level(&ep, level, &dist_calc, nodes, visited_generator);
                 for neighbor in &neighbors {
                     current_node.add_neighbor(neighbor.id, neighbor.dist, level);
@@ -519,17 +524,6 @@ impl HnswBuilder {
 
         *neighbors_ranked = select_neighbors_heuristic(storage, &level_neighbors, m_max);
         builder_node.update_from_ranked_neighbors(level);
-    }
-
-    fn compute_level_count(&self) -> Vec<usize> {
-        let mut level_count = vec![0usize; self.max_level() as usize];
-        for node in self.nodes.iter() {
-            let levels = node.read().unwrap().level_neighbors.len();
-            for count in level_count.iter_mut().take(levels) {
-                *count += 1;
-            }
-        }
-        level_count
     }
 }
 
@@ -672,7 +666,7 @@ impl IvfSubIndex for HNSW {
         let inner = HnswBuilder {
             params: hnsw_metadata.params,
             nodes: Arc::new(nodes.into_iter().map(RwLock::new).collect()),
-            level_count,
+            level_count: level_count.into_iter().map(AtomicUsize::new).collect(),
             entry_point: hnsw_metadata.entry_point,
             visited_generator_queue,
         };
@@ -803,37 +797,34 @@ impl IvfSubIndex for HNSW {
     where
         Self: Sized,
     {
-        let mut inner = HnswBuilder::with_params(params, storage);
-
-        log::debug!(
-            "Building HNSW graph: num={}, max_levels={}, m={}, ef_construction={}, distance_type:{}",
-            storage.len(),
-            inner.params.max_level,
-            inner.params.m,
-            inner.params.ef_construction,
-            storage.distance_type(),
-        );
-
-        if storage.is_empty() {
-            return Ok(Self {
-                inner: Arc::new(inner),
-            });
-        }
-
-        let len = storage.len();
-        (1..len).into_par_iter().for_each_init(
-            || VisitedGenerator::new(len),
-            |visited_generator, node| {
-                inner.insert(node as u32, visited_generator, storage);
-            },
-        );
-        inner.level_count = inner.compute_level_count();
-
+        let inner = HnswBuilder::with_params(params, storage);
         let hnsw = Self {
             inner: Arc::new(inner),
         };
 
-        assert_eq!(hnsw.inner.level_count[0], len);
+        log::debug!(
+            "Building HNSW graph: num={}, max_levels={}, m={}, ef_construction={}, distance_type:{}",
+            storage.len(),
+            hnsw.inner.params.max_level,
+            hnsw.inner.params.m,
+            hnsw.inner.params.ef_construction,
+            storage.distance_type(),
+        );
+
+        if storage.is_empty() {
+            return Ok(hnsw);
+        }
+
+        let len = storage.len();
+        hnsw.inner.level_count[0].fetch_add(1, Ordering::Relaxed);
+        (1..len).into_par_iter().for_each_init(
+            || VisitedGenerator::new(len),
+            |visited_generator, node| {
+                hnsw.inner.insert(node as u32, visited_generator, storage);
+            },
+        );
+
+        assert_eq!(hnsw.inner.level_count[0].load(Ordering::Relaxed), len);
         Ok(hnsw)
     }
 
@@ -900,7 +891,7 @@ impl IvfSubIndex for HNSW {
 mod tests {
     use std::sync::Arc;
 
-    use arrow_array::FixedSizeListArray;
+    use arrow_array::{FixedSizeListArray, Float32Array, UInt64Array};
     use arrow_schema::Schema;
     use lance_arrow::FixedSizeListArrayExt;
     use lance_file::previous::{
@@ -916,7 +907,10 @@ mod tests {
     use lance_testing::datagen::generate_random_array;
     use object_store::path::Path;
 
+    use crate::metrics::NoOpMetricsCollector;
+    use crate::prefilter::NoFilter;
     use crate::scalar::IndexWriter;
+    use crate::vector::storage::{DistCalculator, VectorStore};
     use crate::vector::v3::subindex::IvfSubIndex;
     use crate::vector::{
         flat::storage::FlatFloatStorage,
@@ -990,17 +984,68 @@ mod tests {
     }
 
     #[test]
-    fn test_level_offsets_match_batch_rows() {
+    fn test_empty_hnsw_fallback_matches_flat_search() {
         const DIM: usize = 16;
-        const TOTAL: usize = 512;
+        const TOTAL: usize = 256;
+        const K: usize = 10;
+
         let data = generate_random_array(TOTAL * DIM);
         let fsl = FixedSizeListArray::try_new_from_values(data, DIM as i32).unwrap();
-        let store = FlatFloatStorage::new(fsl, DistanceType::L2);
-        let hnsw = HNSW::index_vectors(&store, HnswBuildParams::default()).unwrap();
-        let metadata = hnsw.metadata();
-        let batch = hnsw.to_batch().unwrap();
+        let store = Arc::new(FlatFloatStorage::new(fsl.clone(), DistanceType::L2));
 
-        assert_eq!(metadata.level_offsets.len(), hnsw.max_level() as usize + 1);
-        assert_eq!(*metadata.level_offsets.last().unwrap(), batch.num_rows());
+        let hnsw = HNSW::empty();
+        assert!(hnsw.is_empty());
+
+        let query = fsl.value(0);
+        let params = HnswQueryParams {
+            ef: 2 * K,
+            lower_bound: None,
+            upper_bound: None,
+            dist_q_c: 0.0,
+        };
+
+        let prefilter = Arc::new(NoFilter);
+        let metrics = NoOpMetricsCollector;
+
+        let result = hnsw
+            .search(
+                query.clone(),
+                K,
+                params,
+                store.as_ref(),
+                prefilter,
+                &metrics,
+            )
+            .unwrap();
+
+        let distances_array = result
+            .column(0)
+            .as_any()
+            .downcast_ref::<Float32Array>()
+            .unwrap();
+        let row_ids_array = result
+            .column(1)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap();
+
+        assert_eq!(distances_array.len(), K);
+        assert_eq!(row_ids_array.len(), K);
+
+        let dist_calc = store.dist_calculator(query, params.dist_q_c);
+        let mut expected: Vec<(u64, f32)> = (0..store.len() as u32)
+            .map(|id| (store.row_id(id), dist_calc.distance(id)))
+            .collect();
+        expected.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+
+        let expected = &expected[..K];
+        let expected_row_ids: Vec<u64> = expected.iter().map(|(row_id, _)| *row_id).collect();
+        let expected_dists: Vec<f32> = expected.iter().map(|(_, dist)| *dist).collect();
+
+        let actual_row_ids: Vec<u64> = row_ids_array.values().to_vec();
+        let actual_dists: Vec<f32> = distances_array.values().to_vec();
+
+        assert_eq!(actual_row_ids, expected_row_ids);
+        assert_eq!(actual_dists, expected_dists);
     }
 }
