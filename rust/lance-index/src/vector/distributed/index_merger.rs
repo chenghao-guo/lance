@@ -3,6 +3,7 @@
 
 //! Index merging mechanisms for distributed vector index building
 
+use crate::vector::quantizer::QuantizerMetadata;
 use arrow::datatypes::Float32Type;
 use arrow_array::cast::AsArray;
 use arrow_array::{Array, FixedSizeListArray};
@@ -112,7 +113,6 @@ use lance_io::scheduler::{ScanScheduler, SchedulerConfig};
 use lance_io::utils::CachedFileSize;
 use lance_linalg::distance::DistanceType;
 
-use crate::vector::quantizer::QuantizerMetadata;
 use arrow_schema::{DataType, Field, Schema as ArrowSchema};
 use bytes::Bytes;
 use prost::Message;
@@ -421,9 +421,7 @@ pub async fn merge_vector_index_files(
     }
 
     // Prepare IVF model and storage metadata aggregation
-    let _unified_ivf = IvfStorageModel::empty();
     let mut distance_type: Option<DistanceType> = None;
-    let _flat_meta: Option<FlatMetadata> = None;
     let mut pq_meta: Option<ProductQuantizationMetadata> = None;
     let mut sq_meta: Option<ScalarQuantizationMetadata> = None;
     let mut dim: Option<usize> = None;
