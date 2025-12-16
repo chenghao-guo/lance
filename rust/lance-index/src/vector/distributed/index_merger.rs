@@ -7,6 +7,7 @@ use crate::vector::quantizer::QuantizerMetadata;
 use arrow::datatypes::Float32Type;
 use arrow_array::cast::AsArray;
 use arrow_array::{Array, FixedSizeListArray};
+use futures::StreamExt as _;
 use lance_core::{Error, Result, ROW_ID_FIELD};
 use snafu::location;
 use std::sync::Arc;
@@ -377,8 +378,6 @@ pub async fn merge_vector_index_files(
     object_store: &lance_io::object_store::ObjectStore,
     index_dir: &object_store::path::Path,
 ) -> Result<()> {
-    use futures::StreamExt as _;
-
     // List child entries under index_dir and collect shard auxiliary files under partial_* subdirs
     let mut aux_paths: Vec<object_store::path::Path> = Vec::new();
     let mut stream = object_store.list(Some(index_dir.clone()));

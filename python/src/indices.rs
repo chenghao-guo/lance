@@ -7,6 +7,7 @@ use arrow::pyarrow::{PyArrowType, ToPyArrow};
 use arrow_array::{Array, FixedSizeListArray};
 use arrow_data::ArrayData;
 use chrono::{DateTime, Utc};
+use futures::StreamExt;
 use lance::dataset::Dataset as LanceDataset;
 use lance::index::vector::ivf::builder::write_vector_storage;
 use lance::io::ObjectStore;
@@ -199,7 +200,6 @@ fn get_partial_pq_codebooks(
     // List all partial_* directories and collect auxiliary.idx paths
     let mut aux_paths: Vec<object_store::path::Path> = Vec::new();
     let mut stream = dataset.ds.object_store().list(Some(index_dir.clone()));
-    use futures::StreamExt;
     while let Some(item) = rt().block_on(Some(py), stream.next())? {
         if let Ok(meta) = item {
             if let Some(fname) = meta.location.filename() {
