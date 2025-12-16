@@ -2900,12 +2900,35 @@ class LanceDataset(pa.dataset.Dataset):
             )
             accelerator = None
 
-        torch_detected_early = accelerator is not None
-        if torch_detected_early:
+        # IMPORTANT: Distributed indexing is CPU-only. Enforce single-node when
+        # accelerator or torch-related paths are detected.
+        torch_detected = False
+        try:
+            if accelerator is not None:
+                torch_detected = True
+            else:
+                impl = kwargs.get("implementation")
+                use_torch_flag = kwargs.get("use_torch") is True
+                one_pass_flag = kwargs.get("one_pass_ivfpq") is True
+                torch_centroids = _check_for_torch(ivf_centroids)
+                torch_codebook = _check_for_torch(pq_codebook)
+                if (
+                    (isinstance(impl, str) and impl.lower() == "torch")
+                    or use_torch_flag
+                    or one_pass_flag
+                    or torch_centroids
+                    or torch_codebook
+                ):
+                    torch_detected = True
+        except Exception:
+            # Be conservative: if detection fails, do not modify behavior
+            pass
+
+        if torch_detected:
             if fragment_ids is not None or index_uuid is not None:
                 LOGGER.info(
-                    "Torch detected (early); enforce single-node indexing "
-                    "(distributed is CPU-only)."
+                    "Torch detected; "
+                    "enforce single-node indexing (distributed is CPU-only)."
                 )
             fragment_ids = None
             index_uuid = None
@@ -3092,38 +3115,6 @@ class LanceDataset(pa.dataset.Dataset):
 
         # Add fragment_ids and index_uuid to kwargs if provided for
         # distributed indexing
-        # IMPORTANT: Distributed indexing is CPU-only. Enforce single-node when
-        # accelerator or torch-related path is detected.
-        torch_detected = False
-        try:
-            if accelerator is not None:
-                torch_detected = True
-            else:
-                impl = kwargs.get("implementation")
-                use_torch_flag = kwargs.get("use_torch") is True
-                one_pass_flag = kwargs.get("one_pass_ivfpq") is True
-                torch_centroids = _check_for_torch(ivf_centroids)
-                torch_codebook = _check_for_torch(pq_codebook)
-                if (
-                    (isinstance(impl, str) and impl.lower() == "torch")
-                    or use_torch_flag
-                    or one_pass_flag
-                    or torch_centroids
-                    or torch_codebook
-                ):
-                    torch_detected = True
-        except Exception:
-            # Be conservative: if detection fails, do not modify behavior
-            pass
-
-        if torch_detected:
-            if fragment_ids is not None or index_uuid is not None:
-                LOGGER.info(
-                    "Torch detected; "
-                    "enforce single-node indexing (distributed is CPU-only)."
-                )
-            fragment_ids = None
-            index_uuid = None
         if fragment_ids is not None:
             kwargs["fragment_ids"] = fragment_ids
         if index_uuid is not None:
