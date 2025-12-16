@@ -216,6 +216,22 @@ def test_distributed_ann(indexed_dataset):
     )
 
 
+def test_distributed_ivf_sq_consistency(dataset):
+    q = np.random.randn(128).astype(np.float32)
+    assert_distributed_vector_consistency(
+        dataset.to_table(),
+        "vector",
+        index_type="IVF_SQ",
+        index_params={"num_partitions": 4},
+        queries=[q],
+        topk=10,
+        tolerance=1e-6,
+        world=2,
+        similarity_metric="recall",
+        similarity_threshold=0.90,
+    )
+
+
 def test_rowid_order(indexed_dataset):
     rs = indexed_dataset.to_table(
         columns=["meta"],
@@ -2984,6 +3000,64 @@ def test_ivf_hnsw_pq_merge_two_shards_success(tmp_path):
         pq_codebook=pre["pq_codebook"],
     )
     ds._ds.merge_index_metadata(shared_uuid, "IVF_HNSW_PQ", None)
+    ds = _commit_index_helper(ds, shared_uuid, column="vector")
+    q = np.random.rand(128).astype(np.float32)
+    results = ds.to_table(nearest={"column": "vector", "q": q, "k": 5})
+    assert 0 < len(results) <= 5
+
+
+def test_ivf_sq_merge_two_shards_success(tmp_path):
+    ds = _make_sample_dataset_distributed(tmp_path, n_rows=2000)
+    frags = ds.get_fragments()
+    assert len(frags) >= 2
+    shard1 = [frags[0].fragment_id]
+    shard2 = [frags[1].fragment_id]
+    shared_uuid = str(uuid.uuid4())
+    ds.create_index(
+        column="vector",
+        index_type="IVF_SQ",
+        fragment_ids=shard1,
+        index_uuid=shared_uuid,
+        num_partitions=4,
+    )
+    ds.create_index(
+        column="vector",
+        index_type="IVF_SQ",
+        fragment_ids=shard2,
+        index_uuid=shared_uuid,
+        num_partitions=4,
+    )
+    ds._ds.merge_index_metadata(shared_uuid, "IVF_SQ", None)
+    ds = _commit_index_helper(ds, shared_uuid, column="vector")
+    q = np.random.rand(128).astype(np.float32)
+    result = ds.to_table(nearest={"column": "vector", "q": q, "k": 5})
+    assert 0 < len(result) <= 5
+
+
+def test_ivf_hnsw_sq_merge_two_shards_success(tmp_path):
+    ds = _make_sample_dataset_distributed(tmp_path, n_rows=2000)
+    frags = ds.get_fragments()
+    assert len(frags) >= 2
+    shard1 = [frags[0].fragment_id]
+    shard2 = [frags[1].fragment_id]
+    shared_uuid = str(uuid.uuid4())
+    ds.create_index(
+        column="vector",
+        index_type="IVF_HNSW_SQ",
+        fragment_ids=shard1,
+        index_uuid=shared_uuid,
+        num_partitions=4,
+        num_sub_vectors=16,
+    )
+    ds.create_index(
+        column="vector",
+        index_type="IVF_HNSW_SQ",
+        fragment_ids=shard2,
+        index_uuid=shared_uuid,
+        num_partitions=4,
+        num_sub_vectors=16,
+    )
+    ds._ds.merge_index_metadata(shared_uuid, "IVF_HNSW_SQ", None)
     ds = _commit_index_helper(ds, shared_uuid, column="vector")
     q = np.random.rand(128).astype(np.float32)
     results = ds.to_table(nearest={"column": "vector", "q": q, "k": 5})
