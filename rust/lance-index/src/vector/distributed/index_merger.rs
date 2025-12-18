@@ -3,7 +3,10 @@
 
 //! Index merging mechanisms for distributed vector index building
 
-use crate::vector::quantizer::QuantizerMetadata;
+use crate::vector::shared::partition_merger::{
+    init_writer_for_flat, init_writer_for_pq, init_writer_for_sq, write_partition_rows,
+    write_unified_ivf_and_index_metadata, SupportedIndexType,
+};
 use arrow::datatypes::Float32Type;
 use arrow_array::cast::AsArray;
 use arrow_array::{Array, FixedSizeListArray};
@@ -108,75 +111,12 @@ use crate::vector::storage::STORAGE_METADATA_KEY;
 use crate::vector::DISTANCE_TYPE_KEY;
 use crate::IndexMetadata as IndexMetaSchema;
 use crate::{INDEX_AUXILIARY_FILE_NAME, INDEX_METADATA_SCHEMA_KEY};
+use arrow_schema::{DataType, Schema as ArrowSchema};
 use lance_file::reader::{FileReader as V2Reader, FileReaderOptions as V2ReaderOptions};
-use lance_file::writer::{FileWriter as V2Writer, FileWriterOptions as V2WriterOptions};
+use lance_file::writer::FileWriter as V2Writer;
 use lance_io::scheduler::{ScanScheduler, SchedulerConfig};
 use lance_io::utils::CachedFileSize;
 use lance_linalg::distance::DistanceType;
-
-use arrow_schema::{DataType, Field, Schema as ArrowSchema};
-use bytes::Bytes;
-use prost::Message;
-
-/// Supported vector index types for distributed merging
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum SupportedIndexType {
-    IvfFlat,
-    IvfPq,
-    IvfSq,
-    IvfHnswFlat,
-    IvfHnswPq,
-    IvfHnswSq,
-}
-
-impl SupportedIndexType {
-    /// Detect index type from reader metadata and schema
-    fn detect(reader: &V2Reader, schema: &ArrowSchema) -> Result<Self> {
-        let has_pq_code_col = schema
-            .fields
-            .iter()
-            .any(|f| f.name() == crate::vector::PQ_CODE_COLUMN);
-        let has_sq_code_col = schema
-            .fields
-            .iter()
-            .any(|f| f.name() == crate::vector::SQ_CODE_COLUMN);
-
-        let is_pq = reader
-            .metadata()
-            .file_schema
-            .metadata
-            .contains_key(PQ_METADATA_KEY)
-            || has_pq_code_col;
-        let is_sq = reader
-            .metadata()
-            .file_schema
-            .metadata
-            .contains_key(SQ_METADATA_KEY)
-            || has_sq_code_col;
-
-        // Detect HNSW-related columns
-        let has_hnsw_vector_id_col = schema.fields.iter().any(|f| f.name() == "__vector_id");
-        let has_hnsw_pointer_col = schema.fields.iter().any(|f| f.name() == "__pointer");
-        let has_hnsw = has_hnsw_vector_id_col || has_hnsw_pointer_col;
-
-        let index_type = match (has_hnsw, is_pq, is_sq) {
-            (false, false, false) => Self::IvfFlat,
-            (false, true, false) => Self::IvfPq,
-            (false, false, true) => Self::IvfSq,
-            (true, false, false) => Self::IvfHnswFlat,
-            (true, true, false) => Self::IvfHnswPq,
-            (true, false, true) => Self::IvfHnswSq,
-            _ => {
-                return Err(Error::NotSupported {
-                    source: "Unsupported index type combination detected".into(),
-                    location: location!(),
-                });
-            }
-        };
-
-        Ok(index_type)
-    }
-}
 
 /// Detect and return supported index type from reader and schema.
 ///
@@ -187,185 +127,6 @@ fn detect_supported_index_type(
     schema: &ArrowSchema,
 ) -> Result<SupportedIndexType> {
     SupportedIndexType::detect(reader, schema)
-}
-
-/// Initialize schema-level metadata on a V2 writer for a given storage.
-///
-/// It writes the distance type and the storage metadata (as a vector payload),
-/// and optionally the raw storage metadata under a storage-specific metadata key
-/// (e.g. PQ_METADATA_KEY or SQ_METADATA_KEY).
-fn init_v2_writer_for_storage(
-    w: &mut V2Writer,
-    dt: DistanceType,
-    storage_meta_json: &str,
-    storage_meta_key: &str,
-) -> Result<()> {
-    // distance type
-    w.add_schema_metadata(DISTANCE_TYPE_KEY, dt.to_string());
-    // storage metadata (vector of one entry for future extensibility)
-    let meta_vec_json = serde_json::to_string(&vec![storage_meta_json.to_string()])?;
-    w.add_schema_metadata(STORAGE_METADATA_KEY, meta_vec_json);
-    if !storage_meta_key.is_empty() {
-        w.add_schema_metadata(storage_meta_key, storage_meta_json.to_string());
-    }
-    Ok(())
-}
-
-/// Create and initialize a unified writer for FLAT storage.
-async fn init_writer_for_flat(
-    object_store: &lance_io::object_store::ObjectStore,
-    aux_out: &object_store::path::Path,
-    d0: usize,
-    dt: DistanceType,
-) -> Result<V2Writer> {
-    let arrow_schema = ArrowSchema::new(vec![
-        (*ROW_ID_FIELD).clone(),
-        Field::new(
-            crate::vector::flat::storage::FLAT_COLUMN,
-            DataType::FixedSizeList(
-                Arc::new(Field::new("item", DataType::Float32, true)),
-                d0 as i32,
-            ),
-            true,
-        ),
-    ]);
-    let writer = object_store.create(aux_out).await?;
-    let mut w = V2Writer::try_new(
-        writer,
-        lance_core::datatypes::Schema::try_from(&arrow_schema)?,
-        V2WriterOptions::default(),
-    )?;
-    let meta_json = serde_json::to_string(&FlatMetadata { dim: d0 })?;
-    init_v2_writer_for_storage(&mut w, dt, &meta_json, "")?;
-    Ok(w)
-}
-
-/// Create and initialize a unified writer for PQ storage.
-/// Always writes the codebook into the unified file and resets buffer_index.
-async fn init_writer_for_pq(
-    object_store: &lance_io::object_store::ObjectStore,
-    aux_out: &object_store::path::Path,
-    dt: DistanceType,
-    pm: &ProductQuantizationMetadata,
-) -> Result<V2Writer> {
-    let num_bytes = if pm.nbits == 4 {
-        pm.num_sub_vectors / 2
-    } else {
-        pm.num_sub_vectors
-    };
-    let arrow_schema = ArrowSchema::new(vec![
-        (*ROW_ID_FIELD).clone(),
-        Field::new(
-            crate::vector::PQ_CODE_COLUMN,
-            DataType::FixedSizeList(
-                Arc::new(Field::new("item", DataType::UInt8, true)),
-                num_bytes as i32,
-            ),
-            true,
-        ),
-    ]);
-    let writer = object_store.create(aux_out).await?;
-    let mut w = V2Writer::try_new(
-        writer,
-        lance_core::datatypes::Schema::try_from(&arrow_schema)?,
-        V2WriterOptions::default(),
-    )?;
-    let mut pm_init = pm.clone();
-    let cb = pm_init.codebook.as_ref().ok_or_else(|| Error::Index {
-        message: "PQ codebook missing".to_string(),
-        location: location!(),
-    })?;
-    let codebook_tensor: pb::Tensor = pb::Tensor::try_from(cb)?;
-    let buf = Bytes::from(codebook_tensor.encode_to_vec());
-    let pos = w.add_global_buffer(buf).await?;
-    pm_init.set_buffer_index(pos);
-    let pm_json = serde_json::to_string(&pm_init)?;
-    init_v2_writer_for_storage(&mut w, dt, &pm_json, PQ_METADATA_KEY)?;
-    Ok(w)
-}
-
-/// Create and initialize a unified writer for SQ storage.
-async fn init_writer_for_sq(
-    object_store: &lance_io::object_store::ObjectStore,
-    aux_out: &object_store::path::Path,
-    dt: DistanceType,
-    sq_meta: &ScalarQuantizationMetadata,
-) -> Result<V2Writer> {
-    let d0 = sq_meta.dim;
-    let arrow_schema = ArrowSchema::new(vec![
-        (*ROW_ID_FIELD).clone(),
-        Field::new(
-            crate::vector::SQ_CODE_COLUMN,
-            DataType::FixedSizeList(
-                Arc::new(Field::new("item", DataType::UInt8, true)),
-                d0 as i32,
-            ),
-            true,
-        ),
-    ]);
-    let writer = object_store.create(aux_out).await?;
-    let mut w = V2Writer::try_new(
-        writer,
-        lance_core::datatypes::Schema::try_from(&arrow_schema)?,
-        V2WriterOptions::default(),
-    )?;
-    let meta_json = serde_json::to_string(sq_meta)?;
-    init_v2_writer_for_storage(&mut w, dt, &meta_json, SQ_METADATA_KEY)?;
-    Ok(w)
-}
-
-/// Write unified IVF and index metadata to the writer.
-async fn write_unified_ivf_and_index_metadata(
-    w: &mut V2Writer,
-    ivf_model: &IvfStorageModel,
-    dt: DistanceType,
-    idx_type: SupportedIndexType,
-) -> Result<()> {
-    let pb_ivf: pb::Ivf = (ivf_model).try_into()?;
-    let pos = w
-        .add_global_buffer(Bytes::from(pb_ivf.encode_to_vec()))
-        .await?;
-    w.add_schema_metadata(IVF_METADATA_KEY, pos.to_string());
-    let idx_meta = IndexMetaSchema {
-        index_type: idx_type.as_str().to_string(),
-        distance_type: dt.to_string(),
-    };
-    w.add_schema_metadata(INDEX_METADATA_SCHEMA_KEY, serde_json::to_string(&idx_meta)?);
-    Ok(())
-}
-
-/// Stream and write a range of rows from reader into writer.
-async fn write_partition_rows(
-    reader: &V2Reader,
-    w: &mut V2Writer,
-    range: std::ops::Range<usize>,
-) -> Result<()> {
-    let mut stream = reader.read_stream(
-        lance_io::ReadBatchParams::Range(range),
-        u32::MAX,
-        4,
-        lance_encoding::decoder::FilterExpression::no_filter(),
-    )?;
-    use futures::StreamExt as _;
-    while let Some(rb) = stream.next().await {
-        let rb = rb?;
-        w.write_batch(&rb).await?;
-    }
-    Ok(())
-}
-
-impl SupportedIndexType {
-    /// Get the index type string for metadata
-    fn as_str(&self) -> &'static str {
-        match self {
-            Self::IvfFlat => "IVF_FLAT",
-            Self::IvfPq => "IVF_PQ",
-            Self::IvfSq => "IVF_SQ",
-            Self::IvfHnswFlat => "IVF_HNSW_FLAT",
-            Self::IvfHnswPq => "IVF_HNSW_PQ",
-            Self::IvfHnswSq => "IVF_HNSW_SQ",
-        }
-    }
 }
 
 /// Merge all partial_* vector index auxiliary files under `index_dir/{uuid}/partial_*/auxiliary.idx`
@@ -1194,13 +955,17 @@ mod tests {
     use super::*;
 
     use arrow_array::{FixedSizeListArray, Float32Array, RecordBatch, UInt64Array, UInt8Array};
+    use arrow_schema::Field;
+    use bytes::Bytes;
     use futures::StreamExt;
     use lance_arrow::FixedSizeListArrayExt;
+    use lance_file::writer::FileWriterOptions as V2WriterOptions;
     use lance_io::object_store::ObjectStore;
     use lance_io::scheduler::{ScanScheduler, SchedulerConfig};
     use lance_io::utils::CachedFileSize;
     use lance_linalg::distance::DistanceType;
     use object_store::path::Path;
+    use prost::Message;
 
     async fn write_flat_partial_aux(
         store: &ObjectStore,
