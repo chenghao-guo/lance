@@ -31,6 +31,7 @@ pub mod kmeans;
 pub mod pq;
 pub mod quantizer;
 pub mod residual;
+pub mod shared;
 pub mod sq;
 pub mod storage;
 pub mod transform;

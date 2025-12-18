@@ -6,6 +6,10 @@ use std::future;
 use std::sync::Arc;
 use std::{collections::HashMap, pin::Pin};
 
+use crate::dataset::ProjectionRequest;
+use crate::index::vector::ivf::v2::PartitionEntry;
+use crate::index::vector::utils::{infer_vector_dim, infer_vector_element_type};
+use crate::Dataset;
 use arrow::array::{AsArray as _, PrimitiveBuilder, UInt32Builder, UInt64Builder};
 use arrow::compute::sort_to_indices;
 use arrow::datatypes::{self};
@@ -39,6 +43,7 @@ use lance_index::vector::quantizer::{
     QuantizationMetadata, QuantizationType, QuantizerBuildParams,
 };
 use lance_index::vector::quantizer::{QuantizerMetadata, QuantizerStorage};
+use lance_index::vector::shared::{write_unified_ivf_and_index_metadata, SupportedIndexType};
 use lance_index::vector::storage::STORAGE_METADATA_KEY;
 use lance_index::vector::transform::Flatten;
 use lance_index::vector::utils::is_finite;
@@ -75,11 +80,6 @@ use object_store::path::Path;
 use prost::Message;
 use snafu::location;
 use tracing::{instrument, span, Level};
-
-use crate::dataset::ProjectionRequest;
-use crate::index::vector::ivf::v2::PartitionEntry;
-use crate::index::vector::utils::{infer_vector_dim, infer_vector_element_type};
-use crate::Dataset;
 
 use super::v2::IVFIndex;
 use super::{
@@ -1079,19 +1079,31 @@ impl<S: IvfSubIndex + 'static, Q: Quantization + 'static> IvfIndexBuilder<S, Q> 
             serde_json::to_string(&storage_partition_metadata)?,
         );
 
-        let index_ivf_pb = pb::Ivf::try_from(&index_ivf)?;
-        let index_metadata = IndexMetadata {
-            index_type: index_type_string(S::name().try_into()?, Q::quantization_type()),
-            distance_type: self.distance_type.to_string(),
-        };
-        index_writer.add_schema_metadata(
-            INDEX_METADATA_SCHEMA_KEY,
-            serde_json::to_string(&index_metadata)?,
-        );
-        let ivf_buffer_pos = index_writer
-            .add_global_buffer(index_ivf_pb.encode_to_vec().into())
+        let index_type_str = index_type_string(S::name().try_into()?, Q::quantization_type());
+        if let Some(idx_type) = SupportedIndexType::from_index_type_str(&index_type_str) {
+            write_unified_ivf_and_index_metadata(
+                &mut index_writer,
+                &index_ivf,
+                self.distance_type,
+                idx_type,
+            )
             .await?;
-        index_writer.add_schema_metadata(IVF_METADATA_KEY, ivf_buffer_pos.to_string());
+        } else {
+            // Fallback for index types not covered by SupportedIndexType (e.g. IVF_RQ).
+            let index_ivf_pb = pb::Ivf::try_from(&index_ivf)?;
+            let index_metadata = IndexMetadata {
+                index_type: index_type_str,
+                distance_type: self.distance_type.to_string(),
+            };
+            index_writer.add_schema_metadata(
+                INDEX_METADATA_SCHEMA_KEY,
+                serde_json::to_string(&index_metadata)?,
+            );
+            let ivf_buffer_pos = index_writer
+                .add_global_buffer(index_ivf_pb.encode_to_vec().into())
+                .await?;
+            index_writer.add_schema_metadata(IVF_METADATA_KEY, ivf_buffer_pos.to_string());
+        }
         index_writer.add_schema_metadata(
             S::metadata_key(),
             serde_json::to_string(&partition_index_metadata)?,
