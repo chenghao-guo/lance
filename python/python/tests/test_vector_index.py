@@ -2316,7 +2316,7 @@ def assert_distributed_vector_consistency(
     safe_sr = max(2, min(safe_sr_ivf, safe_sr_pq))
 
     if index_type in {"IVF_PQ", "IVF_HNSW_PQ"}:
-        preprocessed = builder.prepare_global_ivfpq(
+        preprocessed = builder.prepare_global_ivf_pq(
             nparts,
             nsub,
             distance_type=dist_type,
@@ -2460,7 +2460,7 @@ def test_prepared_global_ivfpq_distributed_merge_and_search(tmp_path: Path):
 
     # Global preparation
     builder = IndicesBuilder(ds, "vector")
-    preprocessed = builder.prepare_global_ivfpq(
+    preprocessed = builder.prepare_global_ivf_pq(
         num_partitions=4,
         num_subvectors=4,
         distance_type="l2",
@@ -2489,7 +2489,7 @@ def test_consistency_improves_with_preprocessed_centroids(tmp_path: Path):
     ds = _make_sample_dataset_preprocessed(tmp_path, n_rows=2000)
 
     builder = IndicesBuilder(ds, "vector")
-    pre = builder.prepare_global_ivfpq(
+    pre = builder.prepare_global_ivf_pq(
         num_partitions=4,
         num_subvectors=16,
         distance_type="l2",
@@ -2625,7 +2625,7 @@ def test_metadata_merge_pq_success(tmp_path):
     node2 = [f.fragment_id for f in frags[mid:]]
     shared_uuid = str(uuid.uuid4())
     builder = IndicesBuilder(ds, "vector")
-    pre = builder.prepare_global_ivfpq(
+    pre = builder.prepare_global_ivf_pq(
         num_partitions=8,
         num_subvectors=16,
         distance_type="l2",
@@ -2719,7 +2719,7 @@ def test_distributed_workflow_merge_and_search(tmp_path):
     node1 = [f.fragment_id for f in frags[:mid]]
     node2 = [f.fragment_id for f in frags[mid:]]
     builder = IndicesBuilder(ds, "vector")
-    pre = builder.prepare_global_ivfpq(
+    pre = builder.prepare_global_ivf_pq(
         num_partitions=4,
         num_subvectors=4,
         distance_type="l2",
@@ -2798,7 +2798,7 @@ def test_distributed_ivf_hnsw_pq_success(tmp_path):
     node2 = [f.fragment_id for f in frags[mid:]]
     shared_uuid = str(uuid.uuid4())
     builder = IndicesBuilder(ds, "vector")
-    pre = builder.prepare_global_ivfpq(
+    pre = builder.prepare_global_ivf_pq(
         num_partitions=4,
         num_subvectors=4,
         distance_type="l2",
@@ -2927,7 +2927,7 @@ def test_ivf_pq_merge_two_shards_success(tmp_path):
     shard2 = [frags[1].fragment_id]
     shared_uuid = str(uuid.uuid4())
     builder = IndicesBuilder(ds, "vector")
-    pre = builder.prepare_global_ivfpq(
+    pre = builder.prepare_global_ivf_pq(
         num_partitions=4,
         num_subvectors=128,
         distance_type="l2",
@@ -2969,7 +2969,7 @@ def test_ivf_hnsw_pq_merge_two_shards_success(tmp_path):
     shard2 = [frags[1].fragment_id]
     shared_uuid = str(uuid.uuid4())
     builder = IndicesBuilder(ds, "vector")
-    pre = builder.prepare_global_ivfpq(
+    pre = builder.prepare_global_ivf_pq(
         num_partitions=4,
         num_subvectors=128,
         distance_type="l2",
@@ -3067,7 +3067,7 @@ def test_distributed_ivf_pq_order_invariance(tmp_path: Path):
 
     # Global IVF+PQ training once; artifacts are reused across shard orders.
     builder = IndicesBuilder(ds, "vector")
-    pre = builder.prepare_global_ivfpq(
+    pre = builder.prepare_global_ivf_pq(
         num_partitions=4,
         num_subvectors=16,
         distance_type="l2",

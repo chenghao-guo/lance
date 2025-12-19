@@ -203,10 +203,10 @@ class IndicesBuilder:
         )
         return PqModel(num_subvectors, pq_codebook)
 
-    def prepare_global_ivfpq(
+    def prepare_global_ivf_pq(
         self,
-        num_partitions: int,
-        num_subvectors: int,
+        num_partitions: Optional[int],
+        num_subvectors: Optional[int],
         *,
         distance_type: str = "l2",
         accelerator: Optional[Union[str, "torch.Device"]] = None,
@@ -267,7 +267,7 @@ class IndicesBuilder:
         num_rows = self.dataset.count_rows()
         nparts = self._determine_num_partitions(num_partitions, num_rows)
         nsub = self._normalize_pq_params(num_subvectors, self.dimension)
-        return self.prepare_global_ivfpq(
+        return self.prepare_global_ivf_pq(
             nparts,
             nsub,
             distance_type=distance_type,
