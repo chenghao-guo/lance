@@ -135,7 +135,7 @@ fn detect_supported_index_type(
 /// Supports IVF_FLAT, IVF_PQ, IVF_SQ, IVF_HNSW_FLAT, IVF_HNSW_PQ, IVF_HNSW_SQ storage types.
 /// For PQ and SQ, this assumes all partial indices share the same quantizer/codebook
 /// and distance type; it will reuse the first encountered metadata.
-pub async fn merge_vector_index_files(
+pub async fn merge_partial_vector_auxiliary_files(
     object_store: &lance_io::object_store::ObjectStore,
     index_dir: &object_store::path::Path,
 ) -> Result<()> {
@@ -1058,7 +1058,7 @@ mod tests {
             .await
             .unwrap();
 
-        merge_vector_index_files(&object_store, &index_dir)
+        merge_partial_vector_auxiliary_files(&object_store, &index_dir)
             .await
             .unwrap();
 
@@ -1156,7 +1156,7 @@ mod tests {
         .await
         .unwrap();
 
-        let res = merge_vector_index_files(&object_store, &index_dir).await;
+        let res = merge_partial_vector_auxiliary_files(&object_store, &index_dir).await;
         match res {
             Err(Error::Index { message, .. }) => {
                 assert!(
@@ -1193,7 +1193,7 @@ mod tests {
             .await
             .unwrap();
 
-        let res = merge_vector_index_files(&object_store, &index_dir).await;
+        let res = merge_partial_vector_auxiliary_files(&object_store, &index_dir).await;
         match res {
             Err(Error::Index { message, .. }) => {
                 assert!(
@@ -1365,7 +1365,7 @@ mod tests {
         .unwrap();
 
         // Merge PQ auxiliary files.
-        merge_vector_index_files(&object_store, &index_dir)
+        merge_partial_vector_auxiliary_files(&object_store, &index_dir)
             .await
             .unwrap();
 
@@ -1493,7 +1493,7 @@ mod tests {
         .await
         .unwrap();
 
-        let res = merge_vector_index_files(&object_store, &index_dir).await;
+        let res = merge_partial_vector_auxiliary_files(&object_store, &index_dir).await;
         match res {
             Err(Error::Index { message, .. }) => {
                 assert!(
@@ -1565,7 +1565,7 @@ mod tests {
         .await
         .unwrap();
 
-        let res = merge_vector_index_files(&object_store, &index_dir).await;
+        let res = merge_partial_vector_auxiliary_files(&object_store, &index_dir).await;
         match res {
             Err(Error::Index { message, .. }) => {
                 assert!(

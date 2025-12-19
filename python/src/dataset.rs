@@ -88,6 +88,7 @@ use lance_index::{
     },
     DatasetIndexExt, IndexParams, IndexType,
 };
+use lance_index::vector::distributed::merge_partial_vector_auxiliary_files;
 use lance_io::object_store::ObjectStoreParams;
 use lance_io::scheduler::{ScanScheduler, SchedulerConfig};
 use lance_io::utils::CachedFileSize;
@@ -2023,7 +2024,7 @@ impl Dataset {
                 "IVF_FLAT" | "IVF_PQ" | "IVF_SQ" | "IVF_HNSW_FLAT" | "IVF_HNSW_PQ"
                 | "IVF_HNSW_SQ" | "VECTOR" => {
                     // Merge distributed vector index partials into unified auxiliary.idx
-                    lance_index::vector::distributed::index_merger::merge_vector_index_files(
+                    merge_partial_vector_auxiliary_files(
                         self.ds.object_store(),
                         &index_dir,
                     )
