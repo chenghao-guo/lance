@@ -120,7 +120,7 @@ pub struct IvfIndexBuilder<S: IvfSubIndex, Q: Quantization> {
 
     frag_reuse_index: Option<Arc<FragReuseIndex>>,
 
-    // fields for distributed indexing
+    // fragments for distributed indexing
     fragment_filter: Option<Vec<u32>>,
 
     // optimize options for only incremental build
