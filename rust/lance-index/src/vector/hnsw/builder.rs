@@ -713,41 +713,7 @@ impl IvfSubIndex for HNSW {
 
         let schema = VECTOR_RESULT_SCHEMA.clone();
         if self.is_empty() {
-            // Fallback: perform flat search over storage when HNSW graph is empty
-            let mut visited_generator = self
-                .inner
-                .visited_generator_queue
-                .pop()
-                .unwrap_or_else(|| VisitedGenerator::new(storage.len()));
-            let results = {
-                if prefilter.is_empty() {
-                    // No prefilter: include all rows
-                    let mut bitset = visited_generator.generate(storage.len());
-                    for (i, _) in storage.row_ids().enumerate() {
-                        bitset.insert(i as u32);
-                    }
-                    self.flat_search(storage, query, k, bitset, &params)
-                } else {
-                    let indices = prefilter.filter_row_ids(Box::new(storage.row_ids()));
-                    let mut bitset = visited_generator.generate(storage.len());
-                    for indices in indices {
-                        bitset.insert(indices as u32);
-                    }
-                    self.flat_search(storage, query, k, bitset, &params)
-                }
-            };
-            // push back generator
-            let _ = self.inner.visited_generator_queue.push(visited_generator);
-
-            // Build result batch
-            let (row_ids, dists): (Vec<_>, Vec<_>) = results
-                .into_iter()
-                .map(|r| (storage.row_id(r.id), r.dist.0))
-                .unique_by(|r| r.0)
-                .unzip();
-            let row_ids = Arc::new(UInt64Array::from(row_ids));
-            let distances = Arc::new(Float32Array::from(dists));
-            return Ok(RecordBatch::try_new(schema, vec![distances, row_ids])?);
+            return Ok(RecordBatch::new_empty(schema));
         }
 
         let mut prefilter_generator = self
