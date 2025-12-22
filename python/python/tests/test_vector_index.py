@@ -920,87 +920,6 @@ def test_create_ivf_rq_index():
     assert res["_distance"].to_numpy().max() == 0.0
 
 
-def test_create_ivf_hnsw_pq_index(dataset, tmp_path):
-    assert not dataset.has_index
-    ann_ds = lance.write_dataset(dataset.to_table(), tmp_path / "indexed.lance")
-    ann_ds = ann_ds.create_index(
-        "vector",
-        index_type="IVF_HNSW_PQ",
-        num_partitions=4,
-        num_sub_vectors=16,
-    )
-    assert ann_ds.list_indices()[0]["fields"] == ["vector"]
-
-    # Distributed vs single similarity check (IVF_HNSW_PQ)
-    q = np.random.randn(128).astype(np.float32)
-    assert_distributed_vector_consistency(
-        dataset.to_table(),
-        "vector",
-        index_type="IVF_HNSW_PQ",
-        index_params={"num_partitions": 4, "num_sub_vectors": 16},
-        queries=[q],
-        topk=10,
-        tolerance=1e-6,
-        world=2,
-        similarity_metric="recall",
-        similarity_threshold=0.85,
-    )
-
-
-def test_create_ivf_hnsw_sq_index(dataset, tmp_path):
-    assert not dataset.has_index
-    ann_ds = lance.write_dataset(dataset.to_table(), tmp_path / "indexed.lance")
-    ann_ds = ann_ds.create_index(
-        "vector",
-        index_type="IVF_HNSW_SQ",
-        num_partitions=4,
-        num_sub_vectors=16,
-    )
-    assert ann_ds.list_indices()[0]["fields"] == ["vector"]
-
-    # Distributed vs single similarity check (IVF_HNSW_SQ)
-    q = np.random.randn(128).astype(np.float32)
-    assert_distributed_vector_consistency(
-        dataset.to_table(),
-        "vector",
-        index_type="IVF_HNSW_SQ",
-        index_params={"num_partitions": 4, "num_sub_vectors": 16},
-        queries=[q],
-        topk=10,
-        tolerance=1e-6,
-        world=2,
-        similarity_metric="recall",
-        similarity_threshold=0.85,
-    )
-
-
-def test_create_ivf_hnsw_flat_index(dataset, tmp_path):
-    assert not dataset.has_index
-    ann_ds = lance.write_dataset(dataset.to_table(), tmp_path / "indexed.lance")
-    ann_ds = ann_ds.create_index(
-        "vector",
-        index_type="IVF_HNSW_FLAT",
-        num_partitions=4,
-        num_sub_vectors=16,
-    )
-    assert ann_ds.list_indices()[0]["fields"] == ["vector"]
-
-    # Distributed vs single similarity check (IVF_HNSW_FLAT)
-    q = np.random.randn(128).astype(np.float32)
-    assert_distributed_vector_consistency(
-        dataset.to_table(),
-        "vector",
-        index_type="IVF_HNSW_FLAT",
-        index_params={"num_partitions": 4, "num_sub_vectors": 16},
-        queries=[q],
-        topk=10,
-        tolerance=1e-6,
-        world=2,
-        similarity_metric="recall",
-        similarity_threshold=0.85,
-    )
-
-
 def test_multivec_ann(indexed_multivec_dataset: lance.LanceDataset):
     query = np.random.rand(5, 128)
     results = indexed_multivec_dataset.scanner(
@@ -2100,11 +2019,8 @@ def test_vector_index_distance_range(tmp_path):
 
 
 # =============================================================================
-# Distributed vector index consistency helper (merged from
-# test_vector_distributed_consistency)
+# Distributed vector index consistency helper
 # =============================================================================
-
-# Note: Keep helper std-only and dependency-free; reuse existing Lance Python APIs.
 
 
 def _split_fragments_evenly(fragment_ids, world):
@@ -2586,7 +2502,7 @@ def test_consistency_improves_with_preprocessed_centroids(tmp_path: Path):
 
 
 # =============================================================================
-# Distributed creation & merge tests (merged from test_distributed_vector_index)
+# Distributed creation & merge tests
 # =============================================================================
 
 
@@ -2818,7 +2734,14 @@ def test_vector_merge_two_shards_success_flat(tmp_path):
     assert 0 < len(result) <= 5
 
 
-def test_distributed_ivf_hnsw_pq_success(tmp_path):
+@pytest.mark.parametrize(
+    "index_type,use_pre,num_sub_vectors",
+    [
+        ("IVF_PQ", True, 4),
+        ("IVF_FLAT", False, 128),
+    ],
+)
+def test_distributed_ivf_parameterized(tmp_path, index_type, use_pre, num_sub_vectors):
     ds = _make_sample_dataset(tmp_path, n_rows=2000)
     frags = ds.get_fragments()
     assert len(frags) >= 2
@@ -2826,76 +2749,52 @@ def test_distributed_ivf_hnsw_pq_success(tmp_path):
     node1 = [f.fragment_id for f in frags[:mid]]
     node2 = [f.fragment_id for f in frags[mid:]]
     shared_uuid = str(uuid.uuid4())
-    builder = IndicesBuilder(ds, "vector")
-    pre = builder.prepare_global_ivf_pq(
-        num_partitions=4,
-        num_subvectors=4,
-        distance_type="l2",
-        sample_rate=7,
-        max_iters=20,
-    )
+
+    pre = None
+    if use_pre:
+        builder = IndicesBuilder(ds, "vector")
+        pre = builder.prepare_global_ivf_pq(
+            num_partitions=4,
+            num_subvectors=num_sub_vectors,
+            distance_type="l2",
+            sample_rate=7,
+            max_iters=20,
+        )
+
     try:
-        ds.create_index(
+        base_kwargs = dict(
             column="vector",
-            index_type="IVF_HNSW_PQ",
-            fragment_ids=node1,
+            index_type=index_type,
             index_uuid=shared_uuid,
             num_partitions=4,
-            num_sub_vectors=4,
-            ivf_centroids=pre["ivf_centroids"],
-            pq_codebook=pre["pq_codebook"],
+            num_sub_vectors=num_sub_vectors,
         )
-        ds.create_index(
-            column="vector",
-            index_type="IVF_HNSW_PQ",
-            fragment_ids=node2,
-            index_uuid=shared_uuid,
-            num_partitions=4,
-            num_sub_vectors=4,
-            ivf_centroids=pre["ivf_centroids"],
-            pq_codebook=pre["pq_codebook"],
-        )
-        ds.merge_index_metadata(shared_uuid, "IVF_HNSW_PQ")
+
+        kwargs1 = dict(base_kwargs, fragment_ids=node1)
+        kwargs2 = dict(base_kwargs, fragment_ids=node2)
+
+        if pre is not None:
+            kwargs1.update(
+                ivf_centroids=pre["ivf_centroids"], pq_codebook=pre["pq_codebook"]
+            )
+            kwargs2.update(
+                ivf_centroids=pre["ivf_centroids"], pq_codebook=pre["pq_codebook"]
+            )
+
+        ds.create_index(**kwargs1)
+        ds.create_index(**kwargs2)
+
+        ds._ds.merge_index_metadata(shared_uuid, index_type, None)
         ds = _commit_index_helper(ds, shared_uuid, "vector")
+
         q = np.random.rand(128).astype(np.float32)
         results = ds.to_table(nearest={"column": "vector", "q": q, "k": 10})
         assert 0 < len(results) <= 10
     except ValueError as e:
-        if "PQ codebook content mismatch across shards" in str(e):
+        if use_pre and "PQ codebook content mismatch across shards" in str(e):
             pytest.skip("PQ codebook mismatch in distributed environment - known issue")
         else:
             raise
-
-
-def test_distributed_ivf_hnsw_flat_success(tmp_path):
-    ds = _make_sample_dataset(tmp_path)
-    frags = ds.get_fragments()
-    assert len(frags) >= 2
-    mid = len(frags) // 2
-    node1 = [f.fragment_id for f in frags[:mid]]
-    node2 = [f.fragment_id for f in frags[mid:]]
-    shared_uuid = str(uuid.uuid4())
-    ds.create_index(
-        column="vector",
-        index_type="IVF_HNSW_FLAT",
-        fragment_ids=node1,
-        index_uuid=shared_uuid,
-        num_partitions=4,
-        num_sub_vectors=128,
-    )
-    ds.create_index(
-        column="vector",
-        index_type="IVF_HNSW_FLAT",
-        fragment_ids=node2,
-        index_uuid=shared_uuid,
-        num_partitions=4,
-        num_sub_vectors=128,
-    )
-    ds._ds.merge_index_metadata(shared_uuid, "IVF_HNSW_FLAT", None)
-    ds = _commit_index_helper(ds, shared_uuid, "vector")
-    q = np.random.rand(128).astype(np.float32)
-    results = ds.to_table(nearest={"column": "vector", "q": q, "k": 10})
-    assert 0 < len(results) <= 10
 
 
 def _commit_index_helper(
@@ -2939,7 +2838,6 @@ def _commit_index_helper(
 
 # =============================================================================
 # Distributed merge specific types tests
-# (merged from test_distributed_merge_specific_types.py)
 # =============================================================================
 
 
@@ -2948,143 +2846,67 @@ def _make_sample_dataset_distributed(tmp_path, n_rows: int = 1000, dim: int = 12
     return _make_sample_dataset_base(tmp_path, "dist_ds2", n_rows, dim)
 
 
-def test_ivf_pq_merge_two_shards_success(tmp_path):
+@pytest.mark.parametrize(
+    "index_type,num_sub_vectors,use_preprocessed",
+    [
+        ("IVF_PQ", 128, True),
+        ("IVF_SQ", None, False),
+    ],
+)
+def test_merge_two_shards_parameterized(
+    tmp_path, index_type, num_sub_vectors, use_preprocessed
+):
     ds = _make_sample_dataset_distributed(tmp_path, n_rows=2000)
     frags = ds.get_fragments()
     assert len(frags) >= 2
     shard1 = [frags[0].fragment_id]
     shard2 = [frags[1].fragment_id]
     shared_uuid = str(uuid.uuid4())
-    builder = IndicesBuilder(ds, "vector")
-    pre = builder.prepare_global_ivf_pq(
-        num_partitions=4,
-        num_subvectors=128,
-        distance_type="l2",
-        sample_rate=7,
-        max_iters=20,
-    )
-    ds.create_index(
-        column="vector",
-        index_type="IVF_PQ",
-        fragment_ids=shard1,
-        index_uuid=shared_uuid,
-        num_partitions=4,
-        num_sub_vectors=128,
-        ivf_centroids=pre["ivf_centroids"],
-        pq_codebook=pre["pq_codebook"],
-    )
-    ds.create_index(
-        column="vector",
-        index_type="IVF_PQ",
-        fragment_ids=shard2,
-        index_uuid=shared_uuid,
-        num_partitions=4,
-        num_sub_vectors=128,
-        ivf_centroids=pre["ivf_centroids"],
-        pq_codebook=pre["pq_codebook"],
-    )
-    ds._ds.merge_index_metadata(shared_uuid, "IVF_PQ", None)
+
+    pre = None
+    if use_preprocessed:
+        builder = IndicesBuilder(ds, "vector")
+        pre = builder.prepare_global_ivf_pq(
+            num_partitions=4,
+            num_subvectors=num_sub_vectors,
+            distance_type="l2",
+            sample_rate=7,
+            max_iters=20,
+        )
+
+    base_kwargs = {
+        "column": "vector",
+        "index_type": index_type,
+        "index_uuid": shared_uuid,
+        "num_partitions": 4,
+    }
+
+    # first shard
+    kwargs1 = dict(base_kwargs)
+    kwargs1["fragment_ids"] = shard1
+    if num_sub_vectors is not None:
+        kwargs1["num_sub_vectors"] = num_sub_vectors
+    if pre is not None:
+        kwargs1["ivf_centroids"] = pre["ivf_centroids"]
+        # only PQ has pq_codebook
+        if "pq_codebook" in pre:
+            kwargs1["pq_codebook"] = pre["pq_codebook"]
+    ds.create_index(**kwargs1)
+
+    # second shard
+    kwargs2 = dict(base_kwargs)
+    kwargs2["fragment_ids"] = shard2
+    if num_sub_vectors is not None:
+        kwargs2["num_sub_vectors"] = num_sub_vectors
+    if pre is not None:
+        kwargs2["ivf_centroids"] = pre["ivf_centroids"]
+        if "pq_codebook" in pre:
+            kwargs2["pq_codebook"] = pre["pq_codebook"]
+    ds.create_index(**kwargs2)
+
+    ds._ds.merge_index_metadata(shared_uuid, index_type, None)
     ds = _commit_index_helper(ds, shared_uuid, column="vector")
-    q = np.random.rand(128).astype(np.float32)
-    result = ds.to_table(nearest={"column": "vector", "q": q, "k": 5})
-    assert 0 < len(result) <= 5
 
-
-def test_ivf_hnsw_pq_merge_two_shards_success(tmp_path):
-    ds = _make_sample_dataset_distributed(tmp_path, n_rows=2000)
-    frags = ds.get_fragments()
-    assert len(frags) >= 2
-    shard1 = [frags[0].fragment_id]
-    shard2 = [frags[1].fragment_id]
-    shared_uuid = str(uuid.uuid4())
-    builder = IndicesBuilder(ds, "vector")
-    pre = builder.prepare_global_ivf_pq(
-        num_partitions=4,
-        num_subvectors=128,
-        distance_type="l2",
-        sample_rate=7,
-        max_iters=20,
-    )
-    ds.create_index(
-        column="vector",
-        index_type="IVF_HNSW_PQ",
-        fragment_ids=shard1,
-        index_uuid=shared_uuid,
-        num_partitions=4,
-        num_sub_vectors=128,
-        ivf_centroids=pre["ivf_centroids"],
-        pq_codebook=pre["pq_codebook"],
-    )
-    ds.create_index(
-        column="vector",
-        index_type="IVF_HNSW_PQ",
-        fragment_ids=shard2,
-        index_uuid=shared_uuid,
-        num_partitions=4,
-        num_sub_vectors=128,
-        ivf_centroids=pre["ivf_centroids"],
-        pq_codebook=pre["pq_codebook"],
-    )
-    ds._ds.merge_index_metadata(shared_uuid, "IVF_HNSW_PQ", None)
-    ds = _commit_index_helper(ds, shared_uuid, column="vector")
-    q = np.random.rand(128).astype(np.float32)
-    results = ds.to_table(nearest={"column": "vector", "q": q, "k": 5})
-    assert 0 < len(results) <= 5
-
-
-def test_ivf_sq_merge_two_shards_success(tmp_path):
-    ds = _make_sample_dataset_distributed(tmp_path, n_rows=2000)
-    frags = ds.get_fragments()
-    assert len(frags) >= 2
-    shard1 = [frags[0].fragment_id]
-    shard2 = [frags[1].fragment_id]
-    shared_uuid = str(uuid.uuid4())
-    ds.create_index(
-        column="vector",
-        index_type="IVF_SQ",
-        fragment_ids=shard1,
-        index_uuid=shared_uuid,
-        num_partitions=4,
-    )
-    ds.create_index(
-        column="vector",
-        index_type="IVF_SQ",
-        fragment_ids=shard2,
-        index_uuid=shared_uuid,
-        num_partitions=4,
-    )
-    ds._ds.merge_index_metadata(shared_uuid, "IVF_SQ", None)
-    ds = _commit_index_helper(ds, shared_uuid, column="vector")
-    q = np.random.rand(128).astype(np.float32)
-    result = ds.to_table(nearest={"column": "vector", "q": q, "k": 5})
-    assert 0 < len(result) <= 5
-
-
-def test_ivf_hnsw_sq_merge_two_shards_success(tmp_path):
-    ds = _make_sample_dataset_distributed(tmp_path, n_rows=2000)
-    frags = ds.get_fragments()
-    assert len(frags) >= 2
-    shard1 = [frags[0].fragment_id]
-    shard2 = [frags[1].fragment_id]
-    shared_uuid = str(uuid.uuid4())
-    ds.create_index(
-        column="vector",
-        index_type="IVF_HNSW_SQ",
-        fragment_ids=shard1,
-        index_uuid=shared_uuid,
-        num_partitions=4,
-        num_sub_vectors=16,
-    )
-    ds.create_index(
-        column="vector",
-        index_type="IVF_HNSW_SQ",
-        fragment_ids=shard2,
-        index_uuid=shared_uuid,
-        num_partitions=4,
-        num_sub_vectors=16,
-    )
-    ds._ds.merge_index_metadata(shared_uuid, "IVF_HNSW_SQ", None)
-    ds = _commit_index_helper(ds, shared_uuid, column="vector")
     q = np.random.rand(128).astype(np.float32)
     results = ds.to_table(nearest={"column": "vector", "q": q, "k": 5})
     assert 0 < len(results) <= 5
