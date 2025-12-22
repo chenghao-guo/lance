@@ -2319,7 +2319,8 @@ def test_prepared_global_ivfpq_distributed_merge_and_search(tmp_path: Path):
         num_partitions=4,
         num_sub_vectors=4,
         world=2,
-        preprocessed_data=preprocessed,
+        ivf_centroids=preprocessed["ivf_centroids"],
+        pq_codebook=preprocessed["pq_codebook"],
     )
 
     # Query sanity
@@ -2349,17 +2350,6 @@ def test_consistency_improves_with_preprocessed_centroids(tmp_path: Path):
         num_sub_vectors=16,
     )
 
-    # Distributed without preprocessed centroids
-    dist_no_pre = lance.write_dataset(ds.to_table(), tmp_path / "dist_no_pre")
-    dist_no_pre = build_distributed_vector_index(
-        dist_no_pre,
-        "vector",
-        index_type="IVF_PQ",
-        num_partitions=4,
-        num_sub_vectors=16,
-        world=2,
-    )
-
     # Distributed with preprocessed IVF centroids
     dist_pre = lance.write_dataset(ds.to_table(), tmp_path / "dist_pre")
     dist_pre = build_distributed_vector_index(
@@ -2369,7 +2359,8 @@ def test_consistency_improves_with_preprocessed_centroids(tmp_path: Path):
         num_partitions=4,
         num_sub_vectors=16,
         world=2,
-        preprocessed_data={"ivf_centroids": pre["ivf_centroids"]},
+        ivf_centroids=pre["ivf_centroids"],
+        pq_codebook=pre["pq_codebook"],
     )
 
     # Evaluate recall vs exact search
@@ -2409,24 +2400,6 @@ def _make_sample_dataset(tmp_path, n_rows: int = 1000, dim: int = 128):
     Reuse the project style and avoid extra dependencies.
     """
     return _make_sample_dataset_base(tmp_path, "dist_ds", n_rows, dim)
-
-
-def test_distributed_api_basic_success(tmp_path):
-    ds = _make_sample_dataset(tmp_path)
-    frags = ds.get_fragments()
-    assert len(frags) > 0, "Dataset must have at least one fragment"
-    shared_uuid = str(uuid.uuid4())
-    fragment_ids = [frags[0].fragment_id] + (
-        [frags[1].fragment_id] if len(frags) > 1 else []
-    )
-    ds.create_index(
-        column="vector",
-        index_type="IVF_PQ",
-        fragment_ids=fragment_ids,
-        index_uuid=shared_uuid,
-        num_partitions=8,
-        num_sub_vectors=16,
-    )
 
 
 @pytest.mark.parametrize(
@@ -2609,6 +2582,17 @@ def test_vector_merge_two_shards_success_flat(tmp_path):
     shard1 = [frags[0].fragment_id]
     shard2 = [frags[1].fragment_id]
     shared_uuid = str(uuid.uuid4())
+
+    # Global preparation
+    builder = IndicesBuilder(ds, "vector")
+    preprocessed = builder.prepare_global_ivf_pq(
+        num_partitions=4,
+        num_subvectors=4,
+        distance_type="l2",
+        sample_rate=3,
+        max_iters=20,
+    )
+
     ds.create_index(
         column="vector",
         index_type="IVF_FLAT",
@@ -2616,6 +2600,8 @@ def test_vector_merge_two_shards_success_flat(tmp_path):
         index_uuid=shared_uuid,
         num_partitions=4,
         num_sub_vectors=128,
+        ivf_centroids=preprocessed["ivf_centroids"],
+        pq_codebook=preprocessed["pq_codebook"],
     )
     ds.create_index(
         column="vector",
@@ -2624,6 +2610,8 @@ def test_vector_merge_two_shards_success_flat(tmp_path):
         index_uuid=shared_uuid,
         num_partitions=4,
         num_sub_vectors=128,
+        ivf_centroids=preprocessed["ivf_centroids"],
+        pq_codebook=preprocessed["pq_codebook"],
     )
     ds._ds.merge_index_metadata(shared_uuid, "IVF_FLAT", None)
     ds = _commit_index_helper(ds, shared_uuid, column="vector")
@@ -2633,13 +2621,13 @@ def test_vector_merge_two_shards_success_flat(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "index_type,use_pre,num_sub_vectors",
+    "index_type,num_sub_vectors",
     [
-        ("IVF_PQ", True, 4),
-        ("IVF_FLAT", False, 128),
+        ("IVF_PQ", 4),
+        ("IVF_FLAT", 128),
     ],
 )
-def test_distributed_ivf_parameterized(tmp_path, index_type, use_pre, num_sub_vectors):
+def test_distributed_ivf_parameterized(tmp_path, index_type, num_sub_vectors):
     ds = _make_sample_dataset(tmp_path, n_rows=2000)
     frags = ds.get_fragments()
     assert len(frags) >= 2
@@ -2648,16 +2636,14 @@ def test_distributed_ivf_parameterized(tmp_path, index_type, use_pre, num_sub_ve
     node2 = [f.fragment_id for f in frags[mid:]]
     shared_uuid = str(uuid.uuid4())
 
-    pre = None
-    if use_pre:
-        builder = IndicesBuilder(ds, "vector")
-        pre = builder.prepare_global_ivf_pq(
-            num_partitions=4,
-            num_subvectors=num_sub_vectors,
-            distance_type="l2",
-            sample_rate=7,
-            max_iters=20,
-        )
+    builder = IndicesBuilder(ds, "vector")
+    pre = builder.prepare_global_ivf_pq(
+        num_partitions=4,
+        num_subvectors=num_sub_vectors,
+        distance_type="l2",
+        sample_rate=7,
+        max_iters=20,
+    )
 
     try:
         base_kwargs = dict(
@@ -2689,10 +2675,7 @@ def test_distributed_ivf_parameterized(tmp_path, index_type, use_pre, num_sub_ve
         results = ds.to_table(nearest={"column": "vector", "q": q, "k": 10})
         assert 0 < len(results) <= 10
     except ValueError as e:
-        if use_pre and "PQ codebook content mismatch across shards" in str(e):
-            pytest.skip("PQ codebook mismatch in distributed environment - known issue")
-        else:
-            raise
+        raise e
 
 
 def _commit_index_helper(
@@ -2745,15 +2728,13 @@ def _make_sample_dataset_distributed(tmp_path, n_rows: int = 1000, dim: int = 12
 
 
 @pytest.mark.parametrize(
-    "index_type,num_sub_vectors,use_preprocessed",
+    "index_type,num_sub_vectors",
     [
-        ("IVF_PQ", 128, True),
-        ("IVF_SQ", None, False),
+        ("IVF_PQ", 128),
+        ("IVF_SQ", None),
     ],
 )
-def test_merge_two_shards_parameterized(
-    tmp_path, index_type, num_sub_vectors, use_preprocessed
-):
+def test_merge_two_shards_parameterized(tmp_path, index_type, num_sub_vectors):
     ds = _make_sample_dataset_distributed(tmp_path, n_rows=2000)
     frags = ds.get_fragments()
     assert len(frags) >= 2
@@ -2761,16 +2742,14 @@ def test_merge_two_shards_parameterized(
     shard2 = [frags[1].fragment_id]
     shared_uuid = str(uuid.uuid4())
 
-    pre = None
-    if use_preprocessed:
-        builder = IndicesBuilder(ds, "vector")
-        pre = builder.prepare_global_ivf_pq(
-            num_partitions=4,
-            num_subvectors=num_sub_vectors,
-            distance_type="l2",
-            sample_rate=7,
-            max_iters=20,
-        )
+    builder = IndicesBuilder(ds, "vector")
+    pre = builder.prepare_global_ivf_pq(
+        num_partitions=4,
+        num_subvectors=num_sub_vectors,
+        distance_type="l2",
+        sample_rate=7,
+        max_iters=20,
+    )
 
     base_kwargs = {
         "column": "vector",
