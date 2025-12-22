@@ -187,11 +187,18 @@ def test_ann(indexed_dataset):
     "fixture_name,index_type,index_params,similarity_threshold",
     [
         ("dataset", "IVF_FLAT", {"num_partitions": 4}, 0.95),
-        ("indexed_dataset", "IVF_PQ", {"num_partitions": 4, "num_sub_vectors": 16}, 0.90),
+        (
+            "indexed_dataset",
+            "IVF_PQ",
+            {"num_partitions": 4, "num_sub_vectors": 16},
+            0.90,
+        ),
         ("dataset", "IVF_SQ", {"num_partitions": 4}, 0.90),
     ],
 )
-def test_distributed_vector(request, fixture_name, index_type, index_params, similarity_threshold):
+def test_distributed_vector(
+    request, fixture_name, index_type, index_params, similarity_threshold
+):
     ds = request.getfixturevalue(fixture_name)
     q = np.random.randn(128).astype(np.float32)
     assert_distributed_vector_consistency(
