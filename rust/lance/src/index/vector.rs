@@ -53,7 +53,6 @@ use lance_index::{
 use lance_io::traits::Reader;
 use lance_linalg::distance::*;
 use lance_table::format::IndexMetadata;
-use prost::Message;
 use serde::Serialize;
 use snafu::location;
 use tracing::instrument;
@@ -63,12 +62,6 @@ use uuid::Uuid;
 use super::{pb, vector_index_details, DatasetIndexInternalExt, IndexParams};
 use crate::dataset::transaction::{Operation, Transaction};
 use crate::{dataset::Dataset, index::pb::vector_index_stage::Stage, Error, Result};
-use arrow_schema::{Field, Schema as ArrowSchema};
-use lance_file::reader::FileReaderOptions;
-use lance_file::writer::FileWriterOptions;
-use lance_io::scheduler::{ScanScheduler, SchedulerConfig};
-use lance_io::utils::CachedFileSize;
-use pb::Tensor as PbTensor;
 
 pub const LANCE_VECTOR_INDEX: &str = "__lance_vector_index";
 
@@ -334,6 +327,16 @@ pub(crate) async fn build_distributed_vector_index(
         });
     };
 
+    if ivf_params.centroids.is_none() {
+        return Err(Error::Index {
+            message: "Build Distributed Vector Index: missing precomputed IVF centroids; \
+            please provide IvfBuildParams.centroids \
+            for concurrent distributed create_index"
+                .to_string(),
+            location: location!(),
+        });
+    }
+
     let (vector_type, element_type) = get_vector_type(dataset.schema(), column)?;
     if let DataType::List(_) = vector_type {
         if params.metric_type != DistanceType::Cosine {
@@ -359,6 +362,12 @@ pub(crate) async fn build_distributed_vector_index(
     });
     let mut ivf_params = ivf_params.clone();
     ivf_params.num_partitions = Some(num_partitions);
+    let ivf_centroids = ivf_params
+        .centroids
+        .as_ref()
+        .expect("precomputed IVF centroids required for distributed indexing; checked above")
+        .as_ref()
+        .clone();
 
     let temp_dir = TempStdDir::default();
     let temp_dir_path = Path::from_filesystem_path(&temp_dir)?;
@@ -381,86 +390,7 @@ pub(crate) async fn build_distributed_vector_index(
                         .join("_")
                 );
                 let index_dir = out_base.child(frag_tag);
-                let dim = crate::index::vector::utils::get_vector_dim(dataset.schema(), column)?;
-                let training_path = out_base.child("global_training.idx");
-                let ivf_model = if let Some(pre_centroids) = ivf_params.centroids.clone() {
-                    // Use precomputed global IVF centroids (shared across shards)
-                    IvfModel::new((*pre_centroids).clone(), None)
-                } else if dataset
-                    .object_store()
-                    .exists(&training_path)
-                    .await
-                    .unwrap_or(false)
-                {
-                    let scheduler = ScanScheduler::new(
-                        std::sync::Arc::new(dataset.object_store().clone()),
-                        SchedulerConfig::max_bandwidth(dataset.object_store()),
-                    );
-                    let file = scheduler
-                        .open_file(&training_path, &CachedFileSize::unknown())
-                        .await?;
-                    let reader = lance_file::reader::FileReader::try_open(
-                        file,
-                        None,
-                        std::sync::Arc::<lance_encoding::decoder::DecoderPlugins>::default(),
-                        &lance_core::cache::LanceCache::no_cache(),
-                        FileReaderOptions::default(),
-                    )
-                    .await?;
-                    let meta = reader.metadata();
-                    let pos_ivf: u32 = meta
-                        .file_schema
-                        .metadata
-                        .get("lance:global_ivf_centroids")
-                        .ok_or_else(|| Error::Index {
-                            message: "Global IVF training metadata missing".to_string(),
-                            location: location!(),
-                        })?
-                        .parse()
-                        .map_err(|_| Error::Index {
-                            message: "Global IVF buffer index parse error".to_string(),
-                            location: location!(),
-                        })?;
-                    let ivf_tensor_bytes = reader.read_global_buffer(pos_ivf).await?;
-                    let ivf_tensor: PbTensor = prost::Message::decode(ivf_tensor_bytes)?;
-                    let ivf_centroids = arrow_array::FixedSizeListArray::try_from(&ivf_tensor)?;
-                    IvfModel::new(ivf_centroids, None)
-                } else {
-                    let ivf_model = crate::index::vector::ivf::build_ivf_model(
-                        dataset,
-                        column,
-                        dim,
-                        params.metric_type,
-                        &ivf_params,
-                    )
-                    .await?;
-                    // Persist trained centroids under out_base/global_training.idx
-                    let arrow_schema = ArrowSchema::new(vec![Field::new(
-                        "_ivf_centroids",
-                        DataType::FixedSizeList(
-                            std::sync::Arc::new(Field::new("item", DataType::Float32, true)),
-                            dim as i32,
-                        ),
-                        true,
-                    )]);
-                    let writer = dataset.object_store().create(&training_path).await?;
-                    let mut v2w = lance_file::writer::FileWriter::try_new(
-                        writer,
-                        lance_core::datatypes::Schema::try_from(&arrow_schema)?,
-                        FileWriterOptions::default(),
-                    )?;
-                    let pb_ivf: pb::Tensor =
-                        pb::Tensor::try_from(&ivf_model.centroids.clone().unwrap())?;
-                    let pos_ivf = v2w
-                        .add_global_buffer(bytes::Bytes::from(pb_ivf.encode_to_vec()))
-                        .await?;
-                    v2w.add_schema_metadata("lance:global_ivf_centroids", pos_ivf.to_string());
-                    let empty_batch =
-                        arrow_array::RecordBatch::new_empty(std::sync::Arc::new(arrow_schema));
-                    v2w.write_batch(&empty_batch).await?;
-                    v2w.finish().await?;
-                    ivf_model
-                };
+                let ivf_model = IvfModel::new(ivf_centroids.clone(), None);
                 IvfIndexBuilder::<FlatIndex, FlatQuantizer>::new(
                     filtered_dataset,
                     column.to_owned(),
@@ -489,93 +419,7 @@ pub(crate) async fn build_distributed_vector_index(
                         .join("_")
                 );
                 let index_dir = out_base.child(frag_tag);
-
-                let dim = crate::index::vector::utils::get_vector_dim(dataset.schema(), column)?;
-                let training_path = out_base.child("global_training.idx");
-                let ivf_model = if let Some(pre_centroids) = ivf_params.centroids.clone() {
-                    // Use precomputed global IVF centroids (shared across shards)
-                    IvfModel::new((*pre_centroids).clone(), None)
-                } else if dataset
-                    .object_store()
-                    .exists(&training_path)
-                    .await
-                    .unwrap_or(false)
-                {
-                    use lance_file::reader::FileReaderOptions;
-                    use lance_io::scheduler::{ScanScheduler, SchedulerConfig};
-                    use lance_io::utils::CachedFileSize;
-                    use pb::Tensor as PbTensor;
-                    let scheduler = ScanScheduler::new(
-                        std::sync::Arc::new(dataset.object_store().clone()),
-                        SchedulerConfig::max_bandwidth(dataset.object_store()),
-                    );
-                    let file = scheduler
-                        .open_file(&training_path, &CachedFileSize::unknown())
-                        .await?;
-                    let reader = lance_file::reader::FileReader::try_open(
-                        file,
-                        None,
-                        std::sync::Arc::<lance_encoding::decoder::DecoderPlugins>::default(),
-                        &lance_core::cache::LanceCache::no_cache(),
-                        FileReaderOptions::default(),
-                    )
-                    .await?;
-                    let meta = reader.metadata();
-                    let pos_ivf: u32 = meta
-                        .file_schema
-                        .metadata
-                        .get("lance:global_ivf_centroids")
-                        .ok_or_else(|| Error::Index {
-                            message: "Global IVF training metadata missing".to_string(),
-                            location: location!(),
-                        })?
-                        .parse()
-                        .map_err(|_| Error::Index {
-                            message: "Global IVF buffer index parse error".to_string(),
-                            location: location!(),
-                        })?;
-                    let ivf_tensor_bytes = reader.read_global_buffer(pos_ivf).await?;
-                    let ivf_tensor: PbTensor = prost::Message::decode(ivf_tensor_bytes)?;
-                    let ivf_centroids = arrow_array::FixedSizeListArray::try_from(&ivf_tensor)?;
-                    IvfModel::new(ivf_centroids, None)
-                } else {
-                    let ivf_model = crate::index::vector::ivf::build_ivf_model(
-                        dataset,
-                        column,
-                        dim,
-                        params.metric_type,
-                        &ivf_params,
-                    )
-                    .await?;
-                    // Persist trained centroids under out_base/global_training.idx
-                    use arrow_schema::{Field, Schema as ArrowSchema};
-                    use lance_file::writer::FileWriterOptions;
-                    let arrow_schema = ArrowSchema::new(vec![Field::new(
-                        "_ivf_centroids",
-                        DataType::FixedSizeList(
-                            std::sync::Arc::new(Field::new("item", DataType::Float32, true)),
-                            dim as i32,
-                        ),
-                        true,
-                    )]);
-                    let writer = dataset.object_store().create(&training_path).await?;
-                    let mut v2w = lance_file::writer::FileWriter::try_new(
-                        writer,
-                        lance_core::datatypes::Schema::try_from(&arrow_schema)?,
-                        FileWriterOptions::default(),
-                    )?;
-                    let pb_ivf: pb::Tensor =
-                        pb::Tensor::try_from(&ivf_model.centroids.clone().unwrap())?;
-                    let pos_ivf = v2w
-                        .add_global_buffer(bytes::Bytes::from(pb_ivf.encode_to_vec()))
-                        .await?;
-                    v2w.add_schema_metadata("lance:global_ivf_centroids", pos_ivf.to_string());
-                    let empty_batch =
-                        arrow_array::RecordBatch::new_empty(std::sync::Arc::new(arrow_schema));
-                    v2w.write_batch(&empty_batch).await?;
-                    v2w.finish().await?;
-                    ivf_model
-                };
+                let ivf_model = IvfModel::new(ivf_centroids.clone(), None);
 
                 IvfIndexBuilder::<FlatIndex, FlatBinQuantizer>::new(
                     filtered_dataset,
@@ -643,208 +487,40 @@ pub(crate) async fn build_distributed_vector_index(
                         column,
                     )?;
                     let metric_type = params.metric_type;
-                    let training_path = out_base.child("global_training.idx");
 
-                    let (ivf_model, global_pq) = if let Some(pre_centroids) =
-                        ivf_params.centroids.clone()
-                    {
-                        // Prefer provided global training artifacts
-                        let ivf_model = IvfModel::new((*pre_centroids).clone(), None);
-                        let pq_quantizer = if let Some(pre_codebook) = pq_params.codebook.clone() {
-                            let codebook_fsl =
-                                arrow_array::FixedSizeListArray::try_new_from_values(
-                                    pre_codebook.clone(),
-                                    dim as i32,
-                                )?;
-                            ProductQuantizer::new(
-                                pq_params.num_sub_vectors,
-                                pq_params.num_bits as u32,
-                                dim,
-                                codebook_fsl,
-                                if metric_type == MetricType::Cosine {
-                                    MetricType::L2
-                                } else {
-                                    metric_type
-                                },
-                            )
+                    if pq_params.codebook.is_none() {
+                        return Err(Error::Index {
+                            message:
+                                "Build Distributed Vector Index: missing precomputed PQ codebook; \
+                            please provide PQBuildParams.codebook for IVF_PQ distributed indexing"
+                                    .to_string(),
+                            location: location!(),
+                        });
+                    }
+
+                    let pre_codebook = pq_params
+                        .codebook
+                        .clone()
+                        .expect("checked above that PQ codebook is present");
+                    let codebook_fsl = arrow_array::FixedSizeListArray::try_new_from_values(
+                        pre_codebook,
+                        dim as i32,
+                    )?;
+
+                    let ivf_model = IvfModel::new(ivf_centroids.clone(), None);
+                    let global_pq = ProductQuantizer::new(
+                        pq_params.num_sub_vectors,
+                        pq_params.num_bits as u32,
+                        dim,
+                        codebook_fsl,
+                        if metric_type == MetricType::Cosine {
+                            MetricType::L2
                         } else {
-                            // Fallback to train PQ model using IVF residuals
-                            crate::index::vector::pq::build_pq_model(
-                                &filtered_dataset,
-                                column,
-                                dim,
-                                metric_type,
-                                pq_params,
-                                Some(&ivf_model),
-                            )
-                            .await?
-                        };
-                        (ivf_model, pq_quantizer)
-                    } else if filtered_dataset
-                        .object_store()
-                        .exists(&training_path)
-                        .await
-                        .unwrap_or(false)
-                    {
-                        use lance_file::reader::FileReaderOptions;
-                        use lance_io::scheduler::{ScanScheduler, SchedulerConfig};
-                        use lance_io::utils::CachedFileSize;
-                        use pb::Tensor as PbTensor;
-                        let scheduler = ScanScheduler::new(
-                            std::sync::Arc::new(filtered_dataset.object_store().clone()),
-                            SchedulerConfig::max_bandwidth(filtered_dataset.object_store()),
-                        );
-                        let file = scheduler
-                            .open_file(&training_path, &CachedFileSize::unknown())
-                            .await?;
-                        let reader = lance_file::reader::FileReader::try_open(
-                            file,
-                            None,
-                            std::sync::Arc::<lance_encoding::decoder::DecoderPlugins>::default(),
-                            &lance_core::cache::LanceCache::no_cache(),
-                            FileReaderOptions::default(),
-                        )
-                        .await?;
-                        let meta = reader.metadata();
-                        let pos_ivf: u32 = meta
-                            .file_schema
-                            .metadata
-                            .get("lance:global_ivf_centroids")
-                            .ok_or_else(|| Error::Index {
-                                message: "Global IVF training metadata missing".to_string(),
-                                location: location!(),
-                            })?
-                            .parse()
-                            .map_err(|_| Error::Index {
-                                message: "Global IVF buffer index parse error".to_string(),
-                                location: location!(),
-                            })?;
-                        let pos_pq: u32 = meta
-                            .file_schema
-                            .metadata
-                            .get("lance:global_pq_codebook")
-                            .ok_or_else(|| Error::Index {
-                                message: "Global PQ training metadata missing".to_string(),
-                                location: location!(),
-                            })?
-                            .parse()
-                            .map_err(|_| Error::Index {
-                                message: "Global PQ buffer index parse error".to_string(),
-                                location: location!(),
-                            })?;
-                        let ivf_tensor_bytes = reader.read_global_buffer(pos_ivf).await?;
-                        let pq_tensor_bytes = reader.read_global_buffer(pos_pq).await?;
-                        let ivf_tensor: PbTensor = prost::Message::decode(ivf_tensor_bytes)?;
-                        let pq_tensor: PbTensor = prost::Message::decode(pq_tensor_bytes)?;
-                        let ivf_centroids = arrow_array::FixedSizeListArray::try_from(&ivf_tensor)?;
-                        let pq_codebook = arrow_array::FixedSizeListArray::try_from(&pq_tensor)?;
-                        let ivf_model = IvfModel::new(ivf_centroids, None);
-                        let pq_quantizer = ProductQuantizer::new(
-                            pq_params.num_sub_vectors,
-                            pq_params.num_bits as u32,
-                            dim,
-                            pq_codebook,
-                            if metric_type == MetricType::Cosine {
-                                MetricType::L2
-                            } else {
-                                metric_type
-                            },
-                        );
-                        (ivf_model, pq_quantizer)
-                    } else {
-                        // Train and persist
-                        let ivf_model = crate::index::vector::ivf::build_ivf_model(
-                            &filtered_dataset,
-                            column,
-                            dim,
-                            metric_type,
-                            &ivf_params,
-                        )
-                        .await?;
-                        let global_pq = if let Some(pre_codebook) = pq_params.codebook.clone() {
-                            let codebook_fsl =
-                                arrow_array::FixedSizeListArray::try_new_from_values(
-                                    pre_codebook.clone(),
-                                    dim as i32,
-                                )?;
-                            ProductQuantizer::new(
-                                pq_params.num_sub_vectors,
-                                pq_params.num_bits as u32,
-                                dim,
-                                codebook_fsl,
-                                if metric_type == MetricType::Cosine {
-                                    MetricType::L2
-                                } else {
-                                    metric_type
-                                },
-                            )
-                        } else {
-                            crate::index::vector::pq::build_pq_model(
-                                &filtered_dataset,
-                                column,
-                                dim,
-                                metric_type,
-                                pq_params,
-                                Some(&ivf_model),
-                            )
-                            .await?
-                        };
-                        // Persist training artifacts under out_base/global_training.idx
-                        use arrow_schema::{Field, Schema as ArrowSchema};
-                        use lance_file::writer::FileWriterOptions;
-                        let arrow_schema = ArrowSchema::new(vec![
-                            Field::new(
-                                "_ivf_centroids",
-                                DataType::FixedSizeList(
-                                    std::sync::Arc::new(Field::new(
-                                        "item",
-                                        DataType::Float32,
-                                        true,
-                                    )),
-                                    dim as i32,
-                                ),
-                                true,
-                            ),
-                            Field::new(
-                                "_pq_codebook",
-                                DataType::FixedSizeList(
-                                    std::sync::Arc::new(Field::new(
-                                        "item",
-                                        DataType::Float32,
-                                        true,
-                                    )),
-                                    dim as i32,
-                                ),
-                                true,
-                            ),
-                        ]);
-                        let writer = filtered_dataset
-                            .object_store()
-                            .create(&training_path)
-                            .await?;
-                        let mut v2w = lance_file::writer::FileWriter::try_new(
-                            writer,
-                            lance_core::datatypes::Schema::try_from(&arrow_schema)?,
-                            FileWriterOptions::default(),
-                        )?;
-                        let pb_ivf: pb::Tensor =
-                            pb::Tensor::try_from(&ivf_model.centroids.clone().unwrap())?;
-                        let pb_pq: pb::Tensor = pb::Tensor::try_from(&global_pq.codebook)?;
-                        let pos_ivf = v2w
-                            .add_global_buffer(bytes::Bytes::from(pb_ivf.encode_to_vec()))
-                            .await?;
-                        let pos_pq = v2w
-                            .add_global_buffer(bytes::Bytes::from(pb_pq.encode_to_vec()))
-                            .await?;
-                        v2w.add_schema_metadata("lance:global_ivf_centroids", pos_ivf.to_string());
-                        v2w.add_schema_metadata("lance:global_pq_codebook", pos_pq.to_string());
-                        // write empty batch
-                        let empty_batch =
-                            arrow_array::RecordBatch::new_empty(std::sync::Arc::new(arrow_schema));
-                        v2w.write_batch(&empty_batch).await?;
-                        v2w.finish().await?;
-                        (ivf_model, global_pq)
-                    };
+                            metric_type
+                        },
+                    );
+
+                    let (ivf_model, global_pq) = (ivf_model, global_pq);
 
                     IvfIndexBuilder::<FlatIndex, ProductQuantizer>::new(
                         filtered_dataset,
@@ -973,46 +649,32 @@ pub(crate) async fn build_distributed_vector_index(
             let dim =
                 crate::index::vector::utils::get_vector_dim(filtered_dataset.schema(), column)?;
             let metric_type = params.metric_type;
-            let ivf_model = if let Some(pre_centroids) = ivf_params.centroids.clone() {
-                IvfModel::new((*pre_centroids).clone(), None)
-            } else {
-                crate::index::vector::ivf::build_ivf_model(
-                    &filtered_dataset,
-                    column,
-                    dim,
-                    metric_type,
-                    &ivf_params,
-                )
-                .await?
-            };
-            // Build PQ model; honor user-provided PQ codebook if present
-            let global_pq = if let Some(pre_codebook) = pq_params.codebook.clone() {
-                let codebook_fsl = arrow_array::FixedSizeListArray::try_new_from_values(
-                    pre_codebook.clone(),
-                    dim as i32,
-                )?;
-                ProductQuantizer::new(
-                    pq_params.num_sub_vectors,
-                    pq_params.num_bits as u32,
-                    dim,
-                    codebook_fsl,
-                    if metric_type == MetricType::Cosine {
-                        MetricType::L2
-                    } else {
-                        metric_type
-                    },
-                )
-            } else {
-                crate::index::vector::pq::build_pq_model(
-                    &filtered_dataset,
-                    column,
-                    dim,
-                    metric_type,
-                    pq_params,
-                    Some(&ivf_model),
-                )
-                .await?
-            };
+            let ivf_model = IvfModel::new(ivf_centroids.clone(), None);
+
+            if pq_params.codebook.is_none() {
+                return Err(Error::Index {
+                    message: "Build Distributed Vector Index: missing precomputed PQ codebook; please provide PQBuildParams.codebook for IVF_HNSW_PQ distributed indexing".to_string(),
+                    location: location!(),
+                });
+            }
+
+            let pre_codebook = pq_params
+                .codebook
+                .clone()
+                .expect("checked above that PQ codebook is present");
+            let codebook_fsl =
+                arrow_array::FixedSizeListArray::try_new_from_values(pre_codebook, dim as i32)?;
+            let global_pq = ProductQuantizer::new(
+                pq_params.num_sub_vectors,
+                pq_params.num_bits as u32,
+                dim,
+                codebook_fsl,
+                if metric_type == MetricType::Cosine {
+                    MetricType::L2
+                } else {
+                    metric_type
+                },
+            );
 
             IvfIndexBuilder::<HNSW, ProductQuantizer>::new(
                 filtered_dataset,
