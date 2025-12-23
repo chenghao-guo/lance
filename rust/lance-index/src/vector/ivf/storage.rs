@@ -110,19 +110,12 @@ impl IvfModel {
         nprobes: usize,
         distance_type: DistanceType,
     ) -> Result<(UInt32Array, Float32Array)> {
-        if let Some(centroids) = self.centroids.clone() {
-            let internal =
-                crate::vector::ivf::new_ivf_transformer(centroids, distance_type, vec![]);
-            internal.find_partitions(query, nprobes)
-        } else {
-            // Fallback: if centroids are not available (e.g., distributed IVF_FLAT shards without pretrained centroids),
-            // probe partitions sequentially with zero distances to allow search to proceed over indexed data.
-            let total = self.num_partitions();
-            let probes = nprobes.min(total);
-            let part_ids = UInt32Array::from_iter_values(0..(probes as u32));
-            let dists = Float32Array::from(vec![0.0f32; probes]);
-            Ok((part_ids, dists))
-        }
+        let internal = crate::vector::ivf::new_ivf_transformer(
+            self.centroids.clone().unwrap(),
+            distance_type,
+            vec![],
+        );
+        internal.find_partitions(query, nprobes)
     }
 
     /// Add the offset and length of one partition.
