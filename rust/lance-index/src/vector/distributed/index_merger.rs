@@ -11,7 +11,7 @@ use arrow::datatypes::Float32Type;
 use arrow_array::cast::AsArray;
 use arrow_array::{Array, FixedSizeListArray};
 use futures::StreamExt as _;
-use lance_core::{Error, Result, ROW_ID_FIELD};
+use lance_core::{Error, Result};
 use snafu::location;
 use std::sync::Arc;
 
@@ -847,79 +847,6 @@ pub async fn merge_partial_vector_auxiliary_files(
         }
     }
 
-    // After merging rows, validate Row ID ranges across shards to detect overlap early
-    // Preflight: rescan each partial auxiliary file to compute [min, max] of _rowid
-    {
-        use arrow_array::types::UInt64Type as U64;
-        let mut ranges: Vec<(u64, u64, object_store::path::Path)> = Vec::new();
-        for aux in &aux_paths {
-            let fh = sched.open_file(aux, &CachedFileSize::unknown()).await?;
-            let reader = V2Reader::try_open(
-                fh,
-                None,
-                Arc::default(),
-                &lance_core::cache::LanceCache::no_cache(),
-                V2ReaderOptions::default(),
-            )
-            .await?;
-            let mut stream = reader.read_stream(
-                lance_io::ReadBatchParams::RangeFull,
-                u32::MAX,
-                4,
-                lance_encoding::decoder::FilterExpression::no_filter(),
-            )?;
-            let mut minv: Option<u64> = None;
-            let mut maxv: Option<u64> = None;
-            while let Some(rb) = stream.next().await {
-                let rb = rb?;
-                if let Some(col) = rb.column_by_name(ROW_ID_FIELD.name()) {
-                    let arr = col.as_primitive::<U64>();
-                    for i in 0..arr.len() {
-                        let v = arr.value(i);
-                        minv = Some(match minv {
-                            Some(m) => m.min(v),
-                            None => v,
-                        });
-                        maxv = Some(match maxv {
-                            Some(m) => m.max(v),
-                            None => v,
-                        });
-                    }
-                } else {
-                    return Err(Error::Index {
-                        message: format!("missing {} in shard", ROW_ID_FIELD.name()),
-                        location: location!(),
-                    });
-                }
-            }
-            if let (Some(a), Some(b)) = (minv, maxv) {
-                ranges.push((a, b, aux.clone()));
-            }
-        }
-        if ranges.len() > 1 {
-            ranges.sort_by_key(|(a, _, _)| *a);
-            let mut prev_min = ranges[0].0;
-            let mut prev_max = ranges[0].1;
-            let mut prev_path = ranges[0].2.clone();
-            for (minv, maxv, path) in ranges.iter().skip(1) {
-                if *minv <= prev_max {
-                    return Err(Error::Index {
-                        message: format!(
-                            "row id ranges overlap: [{}-{}] ({}) vs [{}-{}] ({})",
-                            prev_min, prev_max, prev_path, *minv, *maxv, path
-                        ),
-                        location: location!(),
-                    });
-                }
-                if *maxv > prev_max {
-                    prev_max = *maxv;
-                    prev_path = path.clone();
-                }
-                prev_min = *minv;
-            }
-        }
-    }
-
     // Write unified IVF metadata into global buffer & set schema metadata
     if let Some(w) = v2w_opt.as_mut() {
         let mut ivf_model = if let Some(c) = first_centroids {
@@ -959,6 +886,7 @@ mod tests {
     use bytes::Bytes;
     use futures::StreamExt;
     use lance_arrow::FixedSizeListArrayExt;
+    use lance_core::ROW_ID_FIELD;
     use lance_file::writer::FileWriterOptions as V2WriterOptions;
     use lance_io::object_store::ObjectStore;
     use lance_io::scheduler::{ScanScheduler, SchedulerConfig};

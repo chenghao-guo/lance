@@ -2253,8 +2253,22 @@ mod tests {
         let max_id = fragments.iter().map(|f| f.id as u32).max().unwrap();
         let invalid_id = max_id + 1000;
 
-        let params = VectorIndexParams::ivf_flat(4, MetricType::L2);
+        // let params = VectorIndexParams::ivf_flat(4, MetricType::L2);
         let uuid = Uuid::new_v4().to_string();
+
+        let mut ivf_params = IvfBuildParams {
+            num_partitions: Some(4),
+            ..Default::default()
+        };
+        let dim = utils::get_vector_dim(dataset.schema(), "vector").unwrap();
+        let ivf_model = build_ivf_model(&dataset, "vector", dim, MetricType::L2, &ivf_params)
+            .await
+            .unwrap();
+
+        // Attach precomputed global centroids to ivf_params for distributed build.
+        ivf_params.centroids = ivf_model.centroids.clone().map(Arc::new);
+
+        let params = VectorIndexParams::with_ivf_flat_params(MetricType::L2, ivf_params);
 
         let result = build_distributed_vector_index(
             &dataset,
@@ -2272,15 +2286,6 @@ mod tests {
             "Expected Ok for invalid fragment ids, got {:?}",
             result
         );
-
-        // Ensure that global training file is persisted even when fragment_ids are invalid.
-        let out_base = dataset.indices_dir().child(&*uuid);
-        let training_path = out_base.child("global_training.idx");
-        assert!(
-            dataset.object_store().exists(&training_path).await.unwrap(),
-            "Expected global training file to exist at {:?}",
-            training_path
-        );
     }
 
     #[tokio::test]
@@ -2294,8 +2299,20 @@ mod tests {
             .into_reader_rows(RowCount::from(128), BatchCount::from(1));
         let dataset = Dataset::write(reader, &uri, None).await.unwrap();
 
-        let params = VectorIndexParams::ivf_flat(4, MetricType::L2);
         let uuid = Uuid::new_v4().to_string();
+        let mut ivf_params = IvfBuildParams {
+            num_partitions: Some(4),
+            ..Default::default()
+        };
+        let dim = utils::get_vector_dim(dataset.schema(), "vector").unwrap();
+        let ivf_model = build_ivf_model(&dataset, "vector", dim, MetricType::L2, &ivf_params)
+            .await
+            .unwrap();
+
+        // Attach precomputed global centroids to ivf_params for distributed build.
+        ivf_params.centroids = ivf_model.centroids.clone().map(Arc::new);
+
+        let params = VectorIndexParams::with_ivf_flat_params(MetricType::L2, ivf_params);
 
         let result = build_distributed_vector_index(
             &dataset,
@@ -2312,15 +2329,6 @@ mod tests {
             result.is_ok(),
             "Expected Ok for empty fragment ids, got {:?}",
             result
-        );
-
-        // Ensure that global training file is persisted even when fragment_ids are empty.
-        let out_base = dataset.indices_dir().child(&*uuid);
-        let training_path = out_base.child("global_training.idx");
-        assert!(
-            dataset.object_store().exists(&training_path).await.unwrap(),
-            "Expected global training file to exist at {:?}",
-            training_path
         );
     }
 
@@ -2362,6 +2370,20 @@ mod tests {
         );
         let valid_id = fragments[0].id as u32;
 
+        // let mut ivf_params = IvfBuildParams {
+        //     num_partitions: Some(4),
+        //     ..Default::default()
+        // };
+        // let dim = utils::get_vector_dim(dataset.schema(), "vector").unwrap();
+        // let ivf_model = build_ivf_model(&dataset, "vector", dim, MetricType::L2, &ivf_params)
+        //     .await
+        //     .unwrap();
+        //
+        // // Attach precomputed global centroids to ivf_params for distributed build.
+        // ivf_params.centroids = ivf_model.centroids.clone().map(Arc::new);
+        //
+        // let params = VectorIndexParams::with_ivf_flat_params(MetricType::L2, ivf_params);
+
         let result = build_distributed_vector_index(
             &dataset,
             "vector",
@@ -2376,8 +2398,7 @@ mod tests {
         match result {
             Err(Error::Index { message, .. }) => {
                 assert!(
-                    message.contains("Global IVF training metadata missing")
-                        || message.contains("Global IVF buffer index parse error"),
+                    message.contains("missing precomputed IVF centroids"),
                     "Unexpected error message: {}",
                     message
                 );
@@ -2810,8 +2831,9 @@ mod tests {
             source_sq_params.num_bits, target_sq_params.num_bits,
             "SQ num_bits should match"
         );
+        assert_eq!(target_sq_params.num_bits, 8, "SQ should use 8 bits");
 
-        // Verify the index is functional
+        // Verify the index is functional by performing a search
         let query_vector = lance_datagen::gen_batch()
             .anon_col(array::rand_vec::<Float32Type>(32.into()))
             .into_batch_rows(RowCount::from(1))
@@ -3227,18 +3249,42 @@ mod tests {
             "Source and target should have same number of partitions"
         );
 
-        // Check sub_index contains SQ information
-        let sub_index = stats
-            .get("sub_index")
-            .and_then(|v| v.as_object())
-            .expect("IVF_HNSW_SQ index should have sub_index");
+        // Verify the centroids are exactly the same (key verification for delta indices)
+        if let (Some(source_centroids), Some(target_centroids)) =
+            (&source_ivf_model.centroids, &target_ivf_model.centroids)
+        {
+            assert_eq!(
+                source_centroids.len(),
+                target_centroids.len(),
+                "Centroids arrays should have same length"
+            );
 
-        // Verify SQ parameters
-        assert_eq!(
-            sub_index.get("num_bits").and_then(|v| v.as_u64()),
-            Some(8),
-            "SQ should use 8 bits"
-        );
+            // Compare actual centroid values
+            // Since value() returns Arc<dyn Array>, we need to compare the data directly
+            for i in 0..source_centroids.len() {
+                let source_centroid = source_centroids.value(i);
+                let target_centroid = target_centroids.value(i);
+
+                // Convert to the same type for comparison
+                let source_data = source_centroid
+                    .as_any()
+                    .downcast_ref::<arrow_array::PrimitiveArray<arrow_array::types::Float32Type>>()
+                    .expect("Centroid should be Float32Array");
+                let target_data = target_centroid
+                    .as_any()
+                    .downcast_ref::<arrow_array::PrimitiveArray<arrow_array::types::Float32Type>>()
+                    .expect("Centroid should be Float32Array");
+
+                assert_eq!(
+                    source_data.values(),
+                    target_data.values(),
+                    "Centroid {} values should be identical between source and target",
+                    i
+                );
+            }
+        } else {
+            panic!("Both source and target should have centroids");
+        }
 
         // Verify IVF parameters are correctly derived
         let source_ivf_params = derive_ivf_params(source_ivf_model);
