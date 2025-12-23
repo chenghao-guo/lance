@@ -740,7 +740,14 @@ pub(crate) async fn build_distributed_vector_index(
         }
         IndexType::IvfRq => {
             // Distributed indexing explicitly does not support IVF_RQ; skip silently
-            log::warn!("Build Distributed Vector Index: IVF_RQ is not supported in distributed mode; skipping this shard");
+            return Err(Error::Index {
+                message: format!(
+                    "Build Distributed Vector Index: invalid index type: {:?} \
+                    is not supported in distributed mode; skipping this shard",
+                    index_type
+                ),
+                location: location!(),
+            });
         }
         _ => {
             return Err(Error::Index {
