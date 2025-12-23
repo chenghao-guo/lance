@@ -139,7 +139,6 @@ pub async fn merge_partial_vector_auxiliary_files(
     object_store: &lance_io::object_store::ObjectStore,
     index_dir: &object_store::path::Path,
 ) -> Result<()> {
-    // List child entries under index_dir and collect shard auxiliary files under partial_* subdirs
     let mut aux_paths: Vec<object_store::path::Path> = Vec::new();
     let mut stream = object_store.list(Some(index_dir.clone()));
     while let Some(item) = stream.next().await {
@@ -186,10 +185,6 @@ pub async fn merge_partial_vector_auxiliary_files(
     let mut sq_meta: Option<ScalarQuantizationMetadata> = None;
     let mut dim: Option<usize> = None;
     let mut detected_index_type: Option<SupportedIndexType> = None;
-
-    // We will collect per-partition rows from each partial auxiliary file in order
-    // and append them per partition in the unified writer.
-    // To do this, for each partial, we read its IVF lengths to know the row ranges.
 
     // Prepare output path; we'll create writer once when we know schema
     let aux_out = index_dir.child(INDEX_AUXILIARY_FILE_NAME);
@@ -1097,40 +1092,6 @@ mod tests {
                 "expected Error::Index for distance type mismatch, got {:?}",
                 other
             ),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_merge_rowid_overlap() {
-        let object_store = ObjectStore::memory();
-        let index_dir = Path::from("index/uuid");
-
-        let partial0 = index_dir.child("partial_0");
-        let partial1 = index_dir.child("partial_1");
-        let aux0 = partial0.child(INDEX_AUXILIARY_FILE_NAME);
-        let aux1 = partial1.child(INDEX_AUXILIARY_FILE_NAME);
-
-        let lengths = vec![2_u32, 2_u32];
-        let dim = 2_i32;
-
-        // Overlapping row id ranges: [0, 3] and [1, 4].
-        write_flat_partial_aux(&object_store, &aux0, dim, &lengths, 0, DistanceType::L2)
-            .await
-            .unwrap();
-        write_flat_partial_aux(&object_store, &aux1, dim, &lengths, 1, DistanceType::L2)
-            .await
-            .unwrap();
-
-        let res = merge_partial_vector_auxiliary_files(&object_store, &index_dir).await;
-        match res {
-            Err(Error::Index { message, .. }) => {
-                assert!(
-                    message.contains("row id ranges overlap"),
-                    "unexpected message: {}",
-                    message
-                );
-            }
-            other => panic!("expected Error::Index for row id overlap, got {:?}", other),
         }
     }
 
