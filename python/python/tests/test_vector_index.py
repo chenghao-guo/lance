@@ -208,7 +208,6 @@ def test_distributed_vector(
         index_params=index_params,
         queries=[q],
         topk=10,
-        tolerance=1e-6,
         world=2,
         similarity_metric="recall",
         similarity_threshold=similarity_threshold,
@@ -2164,7 +2163,6 @@ def assert_distributed_vector_consistency(
     index_params=None,
     queries=None,
     topk=10,
-    tolerance=1e-6,
     world=2,
     tmp_path=None,
     similarity_metric="strict",
@@ -2350,13 +2348,8 @@ def assert_distributed_vector_consistency(
     if tmp_dir is not None:
         try:
             shutil.rmtree(tmp_dir)
-        except Exception:
-            pass
-
-
-# =============================================================================
-# Preprocessed IVF_PQ tests (merged from test_preprocessed_ivfpq.py)
-# =============================================================================
+        except Exception as e:
+            logging.exception("Failed to remove temporary directory %s: %s", tmp_dir, e)
 
 
 def _make_sample_dataset_base(
@@ -2475,11 +2468,6 @@ def test_consistency_improves_with_preprocessed_centroids(tmp_path: Path):
     assert recall_pre >= 0.10
 
 
-# =============================================================================
-# Distributed creation & merge tests
-# =============================================================================
-
-
 def _make_sample_dataset(tmp_path, n_rows: int = 1000, dim: int = 128):
     """Create a dataset with an integer 'id' and list<float32> 'vector' column.
     Reuse the project style and avoid extra dependencies.
@@ -2560,10 +2548,7 @@ def test_metadata_merge_pq_success(tmp_path):
         results = ds.to_table(nearest={"column": "vector", "q": q, "k": 10})
         assert 0 < len(results) <= 10
     except ValueError as e:
-        if "PQ codebook content mismatch across shards" in str(e):
-            pytest.skip("PQ codebook mismatch in distributed environment - known issue")
-        else:
-            raise
+        raise e
 
 
 def test_invalid_column_name_precise(tmp_path):
@@ -2654,10 +2639,7 @@ def test_distributed_workflow_merge_and_search(tmp_path):
         results = ds.to_table(nearest={"column": "vector", "q": q, "k": 10})
         assert 0 < len(results) <= 10
     except ValueError as e:
-        if "PQ codebook content mismatch across shards" in str(e):
-            pytest.skip("PQ codebook mismatch in distributed environment - known issue")
-        else:
-            raise
+        raise e
 
 
 def test_vector_merge_two_shards_success_flat(tmp_path):
@@ -2802,11 +2784,6 @@ def _commit_index_helper(
     return ds
 
 
-# =============================================================================
-# Distributed merge specific types tests
-# =============================================================================
-
-
 def _make_sample_dataset_distributed(tmp_path, n_rows: int = 1000, dim: int = 128):
     # Ensure at least 2 fragments by limiting rows per file
     return _make_sample_dataset_base(tmp_path, "dist_ds2", n_rows, dim)
@@ -2932,12 +2909,7 @@ def test_distributed_ivf_pq_order_invariance(tmp_path: Path):
             ds_copy.merge_index_metadata(shared_uuid, "IVF_PQ")
             return _commit_index_helper(ds_copy, shared_uuid, column="vector")
         except ValueError as e:
-            # Known flakiness in some environments when PQ codebooks diverge.
-            if "PQ codebook content mismatch across shards" in str(e):
-                pytest.skip(
-                    "Distributed IVF_PQ codebook mismatch - known environment issue"
-                )
-            raise
+            raise e
 
     ds_12 = build_distributed_ivf_pq(ds_order_12, [node1_12, node2_12])
     ds_21 = build_distributed_ivf_pq(ds_order_21, [node2_21, node1_21])
