@@ -251,31 +251,6 @@ class IndicesBuilder:
         # Return arrays directly; dataset.create_index will wrap them into RecordBatch
         return {"ivf_centroids": ivf_model.centroids, "pq_codebook": pq_model.codebook}
 
-    def prepare(
-        self,
-        num_partitions: Optional[int] = None,
-        num_subvectors: Optional[int] = None,
-        *,
-        distance_type: str = "l2",
-        accelerator: Optional[Union[str, "torch.Device"]] = None,
-        sample_rate: int = 256,
-        max_iters: int = 50,
-    ) -> dict:
-        """
-        Convenience alias for IVF_PQ prepare.
-        """
-        num_rows = self.dataset.count_rows()
-        nparts = self._determine_num_partitions(num_partitions, num_rows)
-        nsub = self._normalize_pq_params(num_subvectors, self.dimension)
-        return self.prepare_global_ivf_pq(
-            nparts,
-            nsub,
-            distance_type=distance_type,
-            accelerator=accelerator,
-            sample_rate=sample_rate,
-            max_iters=max_iters,
-        )
-
     def assign_ivf_partitions(
         self,
         ivf_model: IvfModel,
