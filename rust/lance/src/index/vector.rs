@@ -373,6 +373,11 @@ pub(crate) async fn build_distributed_vector_index(
     let temp_dir_path = Path::from_filesystem_path(&temp_dir)?;
     let shuffler = IvfShuffler::new(temp_dir_path, num_partitions);
 
+    let make_partial_index_dir = |out_base: &Path| -> Path {
+        let shard_uuid = Uuid::new_v4();
+        out_base.child(format!("partial_{}", shard_uuid))
+    };
+
     // Create a fragment-filtered dataset for distributed processing
     let filtered_dataset = dataset.clone();
 
@@ -381,15 +386,7 @@ pub(crate) async fn build_distributed_vector_index(
             DataType::Float16 | DataType::Float32 | DataType::Float64 => {
                 // Write into per-fragment subdir to avoid conflicts during distributed builds
                 let out_base = dataset.indices_dir().child(uuid);
-                let frag_tag = format!(
-                    "partial_{}",
-                    fragment_ids
-                        .iter()
-                        .map(|id| id.to_string())
-                        .collect::<Vec<_>>()
-                        .join("_")
-                );
-                let index_dir = out_base.child(frag_tag);
+                let index_dir = make_partial_index_dir(&out_base);
                 let ivf_model = IvfModel::new(ivf_centroids.clone(), None);
                 IvfIndexBuilder::<FlatIndex, FlatQuantizer>::new(
                     filtered_dataset,
@@ -410,15 +407,7 @@ pub(crate) async fn build_distributed_vector_index(
             DataType::UInt8 => {
                 // Write into per-fragment subdir to avoid conflicts during distributed builds
                 let out_base = dataset.indices_dir().child(uuid);
-                let frag_tag = format!(
-                    "partial_{}",
-                    fragment_ids
-                        .iter()
-                        .map(|id| id.to_string())
-                        .collect::<Vec<_>>()
-                        .join("_")
-                );
-                let index_dir = out_base.child(frag_tag);
+                let index_dir = make_partial_index_dir(&out_base);
                 let ivf_model = IvfModel::new(ivf_centroids.clone(), None);
 
                 IvfIndexBuilder::<FlatIndex, FlatBinQuantizer>::new(
@@ -470,15 +459,7 @@ pub(crate) async fn build_distributed_vector_index(
                 IndexFileVersion::V3 => {
                     // Write into per-fragment subdir to avoid conflicts during distributed builds
                     let out_base = dataset.indices_dir().child(uuid);
-                    let frag_tag = format!(
-                        "partial_{}",
-                        fragment_ids
-                            .iter()
-                            .map(|id| id.to_string())
-                            .collect::<Vec<_>>()
-                            .join("_")
-                    );
-                    let index_dir = out_base.child(frag_tag);
+                    let index_dir = make_partial_index_dir(&out_base);
 
                     // Train global artifacts ONCE and reuse across shards under the shared UUID.
                     // If a precomputed training file exists, load it; otherwise train and persist.
@@ -554,15 +535,7 @@ pub(crate) async fn build_distributed_vector_index(
 
             // Write into per-fragment subdir to avoid conflicts during distributed builds
             let out_base = dataset.indices_dir().child(uuid);
-            let frag_tag = format!(
-                "partial_{}",
-                fragment_ids
-                    .iter()
-                    .map(|id| id.to_string())
-                    .collect::<Vec<_>>()
-                    .join("_")
-            );
-            let index_dir = out_base.child(frag_tag);
+            let index_dir = make_partial_index_dir(&out_base);
             IvfIndexBuilder::<FlatIndex, ScalarQuantizer>::new(
                 filtered_dataset,
                 column.to_owned(),
@@ -590,15 +563,7 @@ pub(crate) async fn build_distributed_vector_index(
             };
             // Write into per-fragment subdir to avoid conflicts during distributed builds
             let out_base = dataset.indices_dir().child(uuid);
-            let frag_tag = format!(
-                "partial_{}",
-                fragment_ids
-                    .iter()
-                    .map(|id| id.to_string())
-                    .collect::<Vec<_>>()
-                    .join("_")
-            );
-            let index_dir = out_base.child(frag_tag);
+            let index_dir = make_partial_index_dir(&out_base);
             IvfIndexBuilder::<HNSW, FlatQuantizer>::new(
                 filtered_dataset,
                 column.to_owned(),
@@ -635,15 +600,7 @@ pub(crate) async fn build_distributed_vector_index(
             };
             // Write into per-fragment subdir to avoid conflicts during distributed builds
             let out_base = dataset.indices_dir().child(uuid);
-            let frag_tag = format!(
-                "partial_{}",
-                fragment_ids
-                    .iter()
-                    .map(|id| id.to_string())
-                    .collect::<Vec<_>>()
-                    .join("_")
-            );
-            let index_dir = out_base.child(frag_tag);
+            let index_dir = make_partial_index_dir(&out_base);
 
             // Train global IVF model and PQ quantizer (residual) once for all shards
             let dim =
@@ -714,15 +671,7 @@ pub(crate) async fn build_distributed_vector_index(
             };
             // Write into per-fragment subdir to avoid conflicts during distributed builds
             let out_base = dataset.indices_dir().child(uuid);
-            let frag_tag = format!(
-                "partial_{}",
-                fragment_ids
-                    .iter()
-                    .map(|id| id.to_string())
-                    .collect::<Vec<_>>()
-                    .join("_")
-            );
-            let index_dir = out_base.child(frag_tag);
+            let index_dir = make_partial_index_dir(&out_base);
             IvfIndexBuilder::<HNSW, ScalarQuantizer>::new(
                 filtered_dataset,
                 column.to_owned(),
