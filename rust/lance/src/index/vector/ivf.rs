@@ -1911,10 +1911,59 @@ pub async fn finalize_distributed_merge(
             location: location!(),
         })?;
 
-    let ivf_bytes = aux_reader.read_global_buffer(ivf_buf_idx).await?;
-    let pb_ivf: lance_index::pb::Ivf = Message::decode(ivf_bytes.clone())?;
-    let ivf_model: IvfModel = IvfModel::try_from(pb_ivf)?;
+    let raw_ivf_bytes = aux_reader.read_global_buffer(ivf_buf_idx).await?;
+    let mut pb_ivf: lance_index::pb::Ivf = Message::decode(raw_ivf_bytes.clone())?;
+
+    // If the unified IVF metadata does not contain centroids, try to source them
+    // from any partial_* index.idx under this index directory.
+    if pb_ivf.centroids_tensor.is_none() {
+        let mut stream = object_store.list(Some(index_dir.clone()));
+        let mut partial_index_path = None;
+
+        while let Some(item) = stream.next().await {
+            let meta = item?;
+            if let Some(fname) = meta.location.filename() {
+                if fname == INDEX_FILE_NAME {
+                    let parts: Vec<_> = meta.location.parts().collect();
+                    if parts.len() >= 2 {
+                        let parent = parts[parts.len() - 2].as_ref();
+                        if parent.starts_with("partial_") {
+                            partial_index_path = Some(meta.location.clone());
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(partial_index_path) = partial_index_path {
+            let fh = scheduler
+                .open_file(&partial_index_path, &CachedFileSize::unknown())
+                .await?;
+            let partial_reader = V2Reader::try_open(
+                fh,
+                None,
+                Arc::default(),
+                &lance_core::cache::LanceCache::no_cache(),
+                V2ReaderOptions::default(),
+            )
+            .await?;
+            let partial_meta = partial_reader.metadata();
+            if let Some(ivf_idx_str) = partial_meta.file_schema.metadata.get(IVF_METADATA_KEY) {
+                if let Ok(ivf_idx) = ivf_idx_str.parse::<u32>() {
+                    let partial_ivf_bytes = partial_reader.read_global_buffer(ivf_idx).await?;
+                    let partial_pb_ivf: lance_index::pb::Ivf = Message::decode(partial_ivf_bytes)?;
+                    if partial_pb_ivf.centroids_tensor.is_some() {
+                        pb_ivf.centroids_tensor = partial_pb_ivf.centroids_tensor;
+                    }
+                }
+            }
+        }
+    }
+
+    let ivf_model: IvfModel = IvfModel::try_from(pb_ivf.clone())?;
     let nlist = ivf_model.num_partitions();
+    let ivf_bytes = pb_ivf.encode_to_vec().into();
 
     // Determine index metadata JSON from auxiliary or requested index type.
     let index_meta_json =
