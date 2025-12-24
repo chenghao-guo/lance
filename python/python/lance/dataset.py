@@ -3182,10 +3182,7 @@ class LanceDataset(pa.dataset.Dataset):
 
         This method supports all index types defined in
         :class:`lance.indices.SupportedDistributedIndices`,
-        including scalar indices
-        (``BTREE``, ``INVERTED``) and precise vector index types
-        such as ``IVF_FLAT``, ``IVF_PQ``, ``IVF_SQ``, ``IVF_HNSW_FLAT``,
-        ``IVF_HNSW_PQ``, and ``IVF_HNSW_SQ``.
+        including scalar indices and precise vector index types.
 
         This method does NOT commit changes.
 
@@ -3196,13 +3193,13 @@ class LanceDataset(pa.dataset.Dataset):
 
         Parameters
         ----------
-        index_uuid : str
+        index_uuid: str
             The shared UUID used when building fragment-level indices.
-        index_type : str
+        index_type: str
             Index type name. Must be one of the enum values in
             :class:`lance.indices.SupportedDistributedIndices`
             (for example ``"IVF_PQ"``).
-        batch_readhead : int, optional
+        batch_readhead: int, optional
             Prefetch concurrency used by BTREE merge reader. Default: 1.
         """
         # Normalize type

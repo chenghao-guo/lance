@@ -9,26 +9,6 @@ from lance.indices.pq import PqModel
 
 __all__ = ["IndicesBuilder", "IndexConfig", "PqModel", "IvfModel", "IndexFileVersion"]
 
-from lance.lance import indices as _indices
-
-
-def get_ivf_model(dataset, index_name: str):
-    inner = getattr(dataset, "_ds", dataset)
-    return _indices.get_ivf_model(inner, index_name)
-
-
-def get_pq_codebook(dataset, index_name: str):
-    inner = getattr(dataset, "_ds", dataset)
-    return _indices.get_pq_codebook(inner, index_name)
-
-
-def get_partial_pq_codebooks(dataset, index_name: str):
-    inner = getattr(dataset, "_ds", dataset)
-    return _indices.get_partial_pq_codebooks(inner, index_name)
-
-
-__all__ += ["get_ivf_model", "get_pq_codebook", "get_partial_pq_codebooks"]
-
 
 class IndexFileVersion(str, Enum):
     LEGACY = "Legacy"
