@@ -2003,7 +2003,7 @@ impl Dataset {
             .infer_error()
     }
 
-    #[pyo3(signature=(index_uuid, index_type, batch_readhead=None))]
+    #[pyo3(signature = (index_uuid, index_type, batch_readhead))]
     fn merge_index_metadata(
         &self,
         index_uuid: &str,
@@ -2013,13 +2013,13 @@ impl Dataset {
         rt().block_on(None, async {
             let store = LanceIndexStore::from_dataset_for_new(self.ds.as_ref(), index_uuid)?;
             let index_dir = self.ds.indices_dir().child(index_uuid);
-            let itype_up = index_type.to_uppercase();
+            let index_type_up = index_type.to_uppercase();
             log::info!(
                 "merge_index_metadata called with index_type={} (upper={})",
                 index_type,
-                itype_up
+                index_type_up
             );
-            match itype_up.as_str() {
+            match index_type_up.as_str() {
                 "INVERTED" => {
                     // Call merge_index_files function for inverted index
                     lance_index::scalar::inverted::builder::merge_index_files(
@@ -2031,24 +2031,21 @@ impl Dataset {
                 }
                 "BTREE" => {
                     // Call merge_index_files function for btree index
-                    // If not provided, default to 1 as documented
-                    let readahead = Some(batch_readhead.unwrap_or(1));
                     lance_index::scalar::btree::merge_index_files(
                         self.ds.object_store(),
                         &index_dir,
                         Arc::new(store),
-                        readahead,
+                        batch_readhead,
                     )
                     .await
                 }
-                // Precise vector index types: IVF_FLAT, IVF_PQ, IVF_SQ, IVF_HNSW_FLAT, IVF_HNSW_PQ, IVF_HNSW_SQ
-                "IVF_FLAT" | "IVF_PQ" | "IVF_SQ" | "IVF_HNSW_FLAT" | "IVF_HNSW_PQ"
-                | "IVF_HNSW_SQ" | "VECTOR" => {
+                // Precise vector index types: IVF_FLAT, IVF_PQ, IVF_SQ
+                "IVF_FLAT" | "IVF_PQ" | "IVF_SQ" | "VECTOR" => {
                     // Merge distributed vector index partials and finalize root index via Lance IVF helper
                     lance::index::vector::ivf::finalize_distributed_merge(
                         self.ds.object_store(),
                         &index_dir,
-                        Some(&itype_up),
+                        Some(&index_type_up),
                     )
                     .await?;
                     Ok(())
@@ -2056,7 +2053,7 @@ impl Dataset {
                 _ => Err(lance::Error::InvalidInput {
                     source: Box::new(std::io::Error::new(
                         std::io::ErrorKind::InvalidInput,
-                        format!("Unsupported index type (patched): {}", itype_up),
+                        format!("Unsupported index type (patched): {}", index_type_up),
                     )),
                     location: location!(),
                 }),
