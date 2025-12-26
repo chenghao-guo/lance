@@ -2003,7 +2003,7 @@ impl Dataset {
             .infer_error()
     }
 
-    #[pyo3(signature = (index_uuid, index_type, batch_readhead))]
+    #[pyo3(signature = (index_uuid, index_type, batch_readhead=None))]
     fn merge_index_metadata(
         &self,
         index_uuid: &str,
