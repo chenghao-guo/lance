@@ -129,6 +129,51 @@ fn detect_supported_index_type(
     SupportedIndexType::detect(reader, schema)
 }
 
+/// Parse a deterministic sort key from a `partial_*` directory name.
+///
+/// The returned tuple is `(min_fragment_id, dataset_version)` where:
+/// - `min_fragment_id` is taken from the first integer token; if missing or parse
+///   fails, `u32::MAX` is used.
+/// - `dataset_version` is taken from the second integer token; if missing or
+///   parse fails, `0` is used.
+fn parse_partial_dir_key(pname: &str) -> (u32, u64) {
+    // Strip well-known prefix but still handle unexpected names defensively.
+    let name = pname.strip_prefix("partial_").unwrap_or(pname);
+
+    let mut ints: Vec<String> = Vec::new();
+    let mut current = String::new();
+
+    for ch in name.chars() {
+        if ch.is_ascii_digit() {
+            current.push(ch);
+        } else if !current.is_empty() {
+            ints.push(current.clone());
+            current.clear();
+        }
+    }
+    if !current.is_empty() {
+        ints.push(current);
+    }
+
+    let min_fragment_id = ints
+        .get(0)
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(u32::MAX);
+    let dataset_version = ints.get(1).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+
+    (min_fragment_id, dataset_version)
+}
+
+/// Derive the sort key for a partial shard from its parent directory name.
+fn partial_aux_sort_key(path: &object_store::path::Path) -> (u32, u64) {
+    let parts: Vec<_> = path.parts().collect();
+    if parts.len() < 2 {
+        return (u32::MAX, 0);
+    }
+    let parent = parts[parts.len() - 2].as_ref();
+    parse_partial_dir_key(parent)
+}
+
 /// Merge all partial_* vector index auxiliary files under `index_dir/{uuid}/partial_*/auxiliary.idx`
 /// into `index_dir/{uuid}/auxiliary.idx`.
 ///
@@ -157,6 +202,9 @@ pub async fn merge_partial_vector_auxiliary_files(
             }
         }
     }
+
+    // Ensure deterministic ordering of partial_* shards before merging.
+    aux_paths.sort_by_key(|p| partial_aux_sort_key(p));
 
     if aux_paths.is_empty() {
         // If a unified auxiliary file already exists at the root, no merge is required.
