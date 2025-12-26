@@ -248,7 +248,6 @@ class IndicesBuilder:
             max_iters=max_iters,
         )
 
-        # Return arrays directly; dataset.create_index will wrap them into RecordBatch
         return {"ivf_centroids": ivf_model.centroids, "pq_codebook": pq_model.codebook}
 
     def assign_ivf_partitions(
