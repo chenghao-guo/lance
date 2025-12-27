@@ -8,5 +8,4 @@
 //! initialize writers and write IVF / index metadata.
 
 pub mod partition_merger;
-
 pub use partition_merger::*;

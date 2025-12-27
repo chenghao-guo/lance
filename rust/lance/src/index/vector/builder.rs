@@ -6,10 +6,6 @@ use std::future;
 use std::sync::Arc;
 use std::{collections::HashMap, pin::Pin};
 
-use crate::dataset::ProjectionRequest;
-use crate::index::vector::ivf::v2::PartitionEntry;
-use crate::index::vector::utils::{infer_vector_dim, infer_vector_element_type};
-use crate::Dataset;
 use arrow::array::{AsArray as _, PrimitiveBuilder, UInt32Builder, UInt64Builder};
 use arrow::compute::sort_to_indices;
 use arrow::datatypes::{self};
@@ -80,6 +76,11 @@ use object_store::path::Path;
 use prost::Message;
 use snafu::location;
 use tracing::{instrument, span, Level};
+
+use crate::dataset::ProjectionRequest;
+use crate::index::vector::ivf::v2::PartitionEntry;
+use crate::index::vector::utils::{infer_vector_dim, infer_vector_element_type};
+use crate::Dataset;
 
 use super::v2::IVFIndex;
 use super::{

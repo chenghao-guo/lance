@@ -826,7 +826,6 @@ pub(crate) async fn build_vector_index(
                     .await?;
                 }
                 IndexFileVersion::V3 => {
-                    // Respect user-provided PQ codebook if present (for distributed/global training reuse)
                     IvfIndexBuilder::<FlatIndex, ProductQuantizer>::new(
                         dataset.clone(),
                         column.to_owned(),
@@ -921,7 +920,6 @@ pub(crate) async fn build_vector_index(
                     location: location!(),
                 });
             };
-            // Respect user-provided PQ codebook if present (for distributed/global training reuse)
             IvfIndexBuilder::<HNSW, ProductQuantizer>::new(
                 dataset.clone(),
                 column.to_owned(),
@@ -2324,22 +2322,8 @@ mod tests {
             !fragments.is_empty(),
             "Dataset should have at least one fragment"
         );
+
         let valid_id = fragments[0].id as u32;
-
-        // let mut ivf_params = IvfBuildParams {
-        //     num_partitions: Some(4),
-        //     ..Default::default()
-        // };
-        // let dim = utils::get_vector_dim(dataset.schema(), "vector").unwrap();
-        // let ivf_model = build_ivf_model(&dataset, "vector", dim, MetricType::L2, &ivf_params)
-        //     .await
-        //     .unwrap();
-        //
-        // // Attach precomputed global centroids to ivf_params for distributed build.
-        // ivf_params.centroids = ivf_model.centroids.clone().map(Arc::new);
-        //
-        // let params = VectorIndexParams::with_ivf_flat_params(MetricType::L2, ivf_params);
-
         let result = build_distributed_vector_index(
             &dataset,
             "vector",
