@@ -7,7 +7,6 @@ use arrow::pyarrow::{PyArrowType, ToPyArrow};
 use arrow_array::{Array, FixedSizeListArray};
 use arrow_data::ArrayData;
 use chrono::{DateTime, Utc};
-use futures::StreamExt;
 use lance::dataset::Dataset as LanceDataset;
 use lance::index::vector::ivf::builder::write_vector_storage;
 use lance::io::ObjectStore;
@@ -178,98 +177,6 @@ fn get_pq_codebook(py: Python<'_>, dataset: &Dataset, index_name: &str) -> PyRes
         );
     }
     pm.codebook.unwrap().into_data().to_pyarrow(py)
-}
-
-#[pyfunction]
-fn get_partial_pq_codebooks(
-    py: Python<'_>,
-    dataset: &Dataset,
-    index_name: &str,
-) -> PyResult<PyObject> {
-    fn err(msg: impl Into<String>) -> PyErr {
-        PyValueError::new_err(msg.into())
-    }
-    let indices = rt()
-        .block_on(Some(py), dataset.ds.load_indices())?
-        .map_err(|e| err(e.to_string()))?;
-    let idx = indices
-        .iter()
-        .find(|i| i.name == index_name)
-        .ok_or_else(|| err(format!("Index \"{}\" not found", index_name)))?;
-    let index_dir = dataset.ds.indices_dir().child(idx.uuid.to_string());
-    // List all partial_* directories and collect auxiliary.idx paths
-    let mut aux_paths: Vec<object_store::path::Path> = Vec::new();
-    let mut stream = dataset.ds.object_store().list(Some(index_dir.clone()));
-    while let Some(item) = rt().block_on(Some(py), stream.next())? {
-        if let Ok(meta) = item {
-            if let Some(fname) = meta.location.filename() {
-                if fname == INDEX_AUXILIARY_FILE_NAME {
-                    // parent dir starts with partial_
-                    let parts: Vec<_> = meta.location.parts().collect();
-                    if parts.len() >= 2 {
-                        let pname = parts[parts.len() - 2].as_ref();
-                        if pname.starts_with("partial_") {
-                            aux_paths.push(meta.location.clone());
-                        }
-                    }
-                }
-            }
-        }
-    }
-    let scheduler = lance_io::scheduler::ScanScheduler::new(
-        Arc::new(dataset.ds.object_store().clone()),
-        lance_io::scheduler::SchedulerConfig::max_bandwidth(dataset.ds.object_store()),
-    );
-    let mut out = Vec::new();
-    for aux in aux_paths.iter() {
-        let fh = rt()
-            .block_on(
-                Some(py),
-                scheduler.open_file(aux, &lance_io::utils::CachedFileSize::unknown()),
-            )?
-            .infer_error()?;
-        let reader = rt()
-            .block_on(
-                Some(py),
-                lance_file::reader::FileReader::try_open(
-                    fh,
-                    None,
-                    Arc::default(),
-                    &lance_core::cache::LanceCache::no_cache(),
-                    lance_file::reader::FileReaderOptions::default(),
-                ),
-            )?
-            .infer_error()?;
-        let meta = reader.metadata();
-        let pm_json = meta
-            .file_schema
-            .metadata
-            .get(PQ_METADATA_KEY)
-            .ok_or_else(|| err("PQ metadata missing"))?
-            .clone();
-        let mut pm: ProductQuantizationMetadata = serde_json::from_str(&pm_json)
-            .map_err(|e| err(format!("PQ metadata parse error: {}", e)))?;
-        if pm.codebook.is_none() {
-            let bytes = rt()
-                .block_on(
-                    Some(py),
-                    reader.read_global_buffer(pm.codebook_position as u32),
-                )?
-                .infer_error()?;
-            let tensor: pb::Tensor = prost::Message::decode(bytes)
-                .map_err(|e| err(format!("Decode codebook error: {}", e)))?;
-            pm.codebook = Some(
-                arrow_array::FixedSizeListArray::try_from(&tensor)
-                    .map_err(|e| err(format!("Tensor to array error: {}", e)))?,
-            );
-        }
-        out.push(pm.codebook.unwrap().into_data());
-    }
-    let py_list = PyList::empty(py);
-    for arr in out.into_iter() {
-        py_list.append(arr.to_pyarrow(py)?)?;
-    }
-    Ok(py_list.into())
 }
 
 #[pyfunction]
@@ -737,7 +644,6 @@ pub fn register_indices(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     indices.add_class::<PyIndexSegmentDescription>()?;
     indices.add_wrapped(wrap_pyfunction!(get_ivf_model))?;
     indices.add_wrapped(wrap_pyfunction!(get_pq_codebook))?;
-    indices.add_wrapped(wrap_pyfunction!(get_partial_pq_codebooks))?;
     m.add_submodule(&indices)?;
     Ok(())
 }
