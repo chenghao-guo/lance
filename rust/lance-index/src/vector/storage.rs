@@ -276,8 +276,7 @@ impl<Q: Quantization> IvfQuantizationStorage<Q> {
 
     pub async fn load_partition(&self, part_id: usize) -> Result<Q::Storage> {
         let range = self.ivf.row_range(part_id);
-        let num_rows = self.reader.num_rows();
-        let batch = if range.is_empty() || num_rows == 0 || (range.end as u64) > num_rows {
+        let batch = if range.is_empty() {
             let schema = self.reader.schema();
             let arrow_schema = arrow_schema::Schema::from(schema.as_ref());
             RecordBatch::new_empty(Arc::new(arrow_schema))
