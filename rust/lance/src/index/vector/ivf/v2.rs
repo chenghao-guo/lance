@@ -282,7 +282,6 @@ impl<S: IvfSubIndex + 'static, Q: Quantization> IVFIndex<S, Q> {
                         }
                     }
                 };
-
                 let batch = batch.add_metadata(
                     S::metadata_key().to_owned(),
                     self.sub_index_metadata[partition_id].clone(),
@@ -316,14 +315,17 @@ impl<S: IvfSubIndex + 'static, Q: Quantization> IVFIndex<S, Q> {
     #[instrument(level = "debug", skip(self))]
     pub fn preprocess_query(&self, partition_id: usize, query: &Query) -> Result<Query> {
         if Q::use_residual(self.distance_type) {
-            if let Some(partition_centroids) = self.ivf.centroid(partition_id) {
-                let residual_key = sub(&query.key, &partition_centroids)?;
-                let mut part_query = query.clone();
-                part_query.key = residual_key;
-                Ok(part_query)
-            } else {
-                Ok(query.clone())
-            }
+            let partition_centroids =
+                self.ivf
+                    .centroid(partition_id)
+                    .ok_or_else(|| Error::Index {
+                        message: format!("partition centroid {} does not exist", partition_id),
+                        location: location!(),
+                    })?;
+            let residual_key = sub(&query.key, &partition_centroids)?;
+            let mut part_query = query.clone();
+            part_query.key = residual_key;
+            Ok(part_query)
         } else {
             Ok(query.clone())
         }
