@@ -819,30 +819,17 @@ impl DatasetIndexExt for Dataset {
             for idx in indices {
                 let field = self.schema().field_by_id(field_id);
                 if let Some(field) = field {
-                    // Backward-compatible: if multiple indices exist on the same field and
-                    // this index is missing details (older manifest format), try to infer
-                    // details from the on-disk index files so we can safely select it.
-                    let idx_checked = if has_multiple && idx.index_details.is_none() {
-                        let field_path = self.schema().field_path(field_id)?;
-                        let details = fetch_index_details(self, &field_path, idx).await?;
-                        let mut idx_clone = idx.clone();
-                        idx_clone.index_details = Some(details);
-                        idx_clone
-                    } else {
-                        idx.clone()
-                    };
                     if index_matches_criteria(
-                        &idx_checked,
+                        idx,
                         &criteria,
                         &[field],
                         has_multiple,
                         self.schema(),
                     )? {
-                        let non_empty =
-                            idx_checked.fragment_bitmap.as_ref().is_some_and(|bitmap| {
-                                bitmap.intersection_len(self.fragment_bitmap.as_ref()) > 0
-                            });
-                        let is_fts_index = if let Some(details) = &idx_checked.index_details {
+                        let non_empty = idx.fragment_bitmap.as_ref().is_some_and(|bitmap| {
+                            bitmap.intersection_len(self.fragment_bitmap.as_ref()) > 0
+                        });
+                        let is_fts_index = if let Some(details) = &idx.index_details {
                             IndexDetails(details.clone()).supports_fts()
                         } else {
                             false
@@ -852,7 +839,7 @@ impl DatasetIndexExt for Dataset {
                         // bitmap appropriately and fall back to scanning unindexed data.
                         // Other index types can be skipped if empty since they're optional optimizations.
                         if non_empty || is_fts_index {
-                            return Ok(Some(idx_checked));
+                            return Ok(Some(idx.clone()));
                         }
                     }
                 }
