@@ -30,7 +30,7 @@ use crate::{IndexMetadata as IndexMetaSchema, INDEX_METADATA_SCHEMA_KEY};
 /// full `IndexType` dependency into helpers that only need the string
 /// representation.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum SupportedIndexType {
+pub enum SupportedIvfIndexType {
     IvfFlat,
     IvfPq,
     IvfSq,
@@ -39,7 +39,7 @@ pub enum SupportedIndexType {
     IvfHnswSq,
 }
 
-impl SupportedIndexType {
+impl SupportedIvfIndexType {
     /// Get the index type string used in metadata.
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -53,7 +53,7 @@ impl SupportedIndexType {
     }
 
     /// Map an index type string (as stored in metadata) to a
-    /// [`SupportedIndexType`] if it is one of the IVF variants this
+    /// [`SupportedIvfIndexType`] if it is one of the IVF variants this
     /// helper understands.
     pub fn from_index_type_str(s: &str) -> Option<Self> {
         match s {
@@ -71,7 +71,7 @@ impl SupportedIndexType {
     ///
     /// This is primarily used by the distributed index merger when
     /// consolidating partial auxiliary files.
-    pub fn detect(reader: &V2Reader, schema: &ArrowSchema) -> Result<Self> {
+    pub fn detect_from_reader_and_schema(reader: &V2Reader, schema: &ArrowSchema) -> Result<Self> {
         let has_pq_code_col = schema.fields.iter().any(|f| f.name() == PQ_CODE_COLUMN);
         let has_sq_code_col = schema.fields.iter().any(|f| f.name() == SQ_CODE_COLUMN);
 
@@ -121,7 +121,7 @@ pub async fn write_unified_ivf_and_index_metadata(
     w: &mut FileWriter,
     ivf_model: &IvfModel,
     dt: DistanceType,
-    idx_type: SupportedIndexType,
+    idx_type: SupportedIvfIndexType,
 ) -> Result<()> {
     let pb_ivf: pb::Ivf = (ivf_model).try_into()?;
     let pos = w

@@ -4,7 +4,7 @@
 //! Index merging mechanisms for distributed vector index building
 
 use crate::vector::shared::partition_merger::{
-    write_unified_ivf_and_index_metadata, SupportedIndexType,
+    write_unified_ivf_and_index_metadata, SupportedIvfIndexType,
 };
 use arrow::datatypes::Float32Type;
 use arrow_array::cast::AsArray;
@@ -279,8 +279,8 @@ pub async fn write_partition_rows(
 fn detect_supported_index_type(
     reader: &V2Reader,
     schema: &ArrowSchema,
-) -> Result<SupportedIndexType> {
-    SupportedIndexType::detect(reader, schema)
+) -> Result<SupportedIvfIndexType> {
+    SupportedIvfIndexType::detect_from_reader_and_schema(reader, schema)
 }
 
 /// Decode the fragment id from an encoded row id.
@@ -462,7 +462,7 @@ pub async fn merge_partial_vector_auxiliary_files(
     let mut pq_meta: Option<ProductQuantizationMetadata> = None;
     let mut sq_meta: Option<ScalarQuantizationMetadata> = None;
     let mut dim: Option<usize> = None;
-    let mut detected_index_type: Option<SupportedIndexType> = None;
+    let mut detected_index_type: Option<SupportedIvfIndexType> = None;
 
     // Prepare output path; we'll create writer once when we know schema
     let aux_out = index_dir.child(INDEX_AUXILIARY_FILE_NAME);
@@ -568,12 +568,12 @@ pub async fn merge_partial_vector_auxiliary_files(
                 {
                     let idx_meta: IndexMetaSchema = serde_json::from_str(idx_meta_json)?;
                     detected_index_type = Some(match idx_meta.index_type.as_str() {
-                        "IVF_FLAT" => SupportedIndexType::IvfFlat,
-                        "IVF_PQ" => SupportedIndexType::IvfPq,
-                        "IVF_SQ" => SupportedIndexType::IvfSq,
-                        "IVF_HNSW_FLAT" => SupportedIndexType::IvfHnswFlat,
-                        "IVF_HNSW_PQ" => SupportedIndexType::IvfHnswPq,
-                        "IVF_HNSW_SQ" => SupportedIndexType::IvfHnswSq,
+                        "IVF_FLAT" => SupportedIvfIndexType::IvfFlat,
+                        "IVF_PQ" => SupportedIvfIndexType::IvfPq,
+                        "IVF_SQ" => SupportedIvfIndexType::IvfSq,
+                        "IVF_HNSW_FLAT" => SupportedIvfIndexType::IvfHnswFlat,
+                        "IVF_HNSW_PQ" => SupportedIvfIndexType::IvfHnswPq,
+                        "IVF_HNSW_SQ" => SupportedIvfIndexType::IvfHnswSq,
                         other => {
                             return Err(Error::Index {
                                 message: format!(
@@ -638,7 +638,7 @@ pub async fn merge_partial_vector_auxiliary_files(
             location: location!(),
         })?;
         match idx_type {
-            SupportedIndexType::IvfSq => {
+            SupportedIvfIndexType::IvfSq => {
                 // Handle Scalar Quantization (SQ) storage for IVF_SQ
                 let sq_json = if let Some(sq_json) =
                     reader.metadata().file_schema.metadata.get(SQ_METADATA_KEY)
@@ -706,7 +706,7 @@ pub async fn merge_partial_vector_auxiliary_files(
                     v2w_opt = Some(w);
                 }
             }
-            SupportedIndexType::IvfPq => {
+            SupportedIvfIndexType::IvfPq => {
                 // Handle Product Quantization (PQ) storage
                 // Load PQ metadata JSON; construct ProductQuantizationMetadata
                 let pm_json = if let Some(pm_json) =
@@ -821,7 +821,7 @@ pub async fn merge_partial_vector_auxiliary_files(
                     v2w_opt = Some(w);
                 }
             }
-            SupportedIndexType::IvfFlat => {
+            SupportedIvfIndexType::IvfFlat => {
                 // Handle FLAT storage
                 // FLAT: infer dimension from vector column using first shard's schema
                 let schema: ArrowSchema = reader.schema().as_ref().into();
@@ -851,7 +851,7 @@ pub async fn merge_partial_vector_auxiliary_files(
                     v2w_opt = Some(w);
                 }
             }
-            SupportedIndexType::IvfHnswFlat => {
+            SupportedIvfIndexType::IvfHnswFlat => {
                 // Treat HNSW_FLAT storage the same as FLAT: create schema with ROW_ID + flat vectors
                 // Determine dimension from shard schema (flat column) or fallback to STORAGE_METADATA_KEY
                 let schema_arrow: ArrowSchema = reader.schema().as_ref().into();
@@ -916,7 +916,7 @@ pub async fn merge_partial_vector_auxiliary_files(
                     v2w_opt = Some(w);
                 }
             }
-            SupportedIndexType::IvfHnswPq => {
+            SupportedIvfIndexType::IvfHnswPq => {
                 // Treat HNSW_PQ storage the same as PQ: reuse PQ metadata and schema creation
                 let pm_json = if let Some(pm_json) =
                     reader.metadata().file_schema.metadata.get(PQ_METADATA_KEY)
@@ -1027,7 +1027,7 @@ pub async fn merge_partial_vector_auxiliary_files(
                     v2w_opt = Some(w);
                 }
             }
-            SupportedIndexType::IvfHnswSq => {
+            SupportedIvfIndexType::IvfHnswSq => {
                 // Treat HNSW_SQ storage the same as SQ: reuse SQ metadata and schema creation
                 let sq_json = if let Some(sq_json) =
                     reader.metadata().file_schema.metadata.get(SQ_METADATA_KEY)
