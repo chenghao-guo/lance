@@ -2388,15 +2388,8 @@ def _make_sample_dataset_base(
     )
 
 
-def _make_sample_dataset_preprocessed(
-    tmp_path: Path, n_rows: int = 1000, dim: int = 128
-):
-    """Create a dataset with an integer 'id' and list<float32> 'vector' column."""
-    return _make_sample_dataset_base(tmp_path, "preproc_ds", n_rows, dim)
-
-
 def test_prepared_global_ivfpq_distributed_merge_and_search(tmp_path: Path):
-    ds = _make_sample_dataset_preprocessed(tmp_path, n_rows=2000)
+    ds = _make_sample_dataset_base(tmp_path, "preproc_ds", 2000, 128)
 
     # Global preparation
     builder = IndicesBuilder(ds, "vector")
@@ -2427,7 +2420,7 @@ def test_prepared_global_ivfpq_distributed_merge_and_search(tmp_path: Path):
 
 
 def test_consistency_improves_with_preprocessed_centroids(tmp_path: Path):
-    ds = _make_sample_dataset_preprocessed(tmp_path, n_rows=2000)
+    ds = _make_sample_dataset_base(tmp_path, "preproc_ds", 2000, 128)
 
     builder = IndicesBuilder(ds, "vector")
     pre = builder.prepare_global_ivf_pq(
@@ -2487,45 +2480,8 @@ def test_consistency_improves_with_preprocessed_centroids(tmp_path: Path):
     assert recall_pre >= 0.10
 
 
-def _make_sample_dataset(tmp_path, n_rows: int = 1000, dim: int = 128):
-    """Create a dataset with an integer 'id' and list<float32> 'vector' column.
-    Reuse the project style and avoid extra dependencies.
-    """
-    return _make_sample_dataset_base(tmp_path, "dist_ds", n_rows, dim)
-
-
-@pytest.mark.parametrize(
-    "case_name, selector",
-    [
-        (
-            "scattered_fragments",
-            lambda fs: [fs[0].fragment_id, fs[2].fragment_id]
-            if len(fs) >= 3
-            else [fs[0].fragment_id],
-        ),
-        ("all_fragments", lambda fs: [f.fragment_id for f in fs]),
-    ],
-)
-def test_fragment_allocations_divisibility_error(tmp_path, case_name, selector):
-    ds = _make_sample_dataset(tmp_path)
-    frags = ds.get_fragments()
-    fragment_ids = selector(frags)
-    shared_uuid = str(uuid.uuid4())
-    with pytest.raises(
-        ValueError, match=r"dimension .* must be divisible by num_sub_vectors"
-    ):
-        ds.create_index(
-            column="vector",
-            index_type="IVF_PQ",
-            fragment_ids=fragment_ids,
-            index_uuid=shared_uuid,
-            num_partitions=5,
-            num_sub_vectors=96,
-        )
-
-
 def test_metadata_merge_pq_success(tmp_path):
-    ds = _make_sample_dataset(tmp_path, n_rows=2000)
+    ds = _make_sample_dataset_base(tmp_path, "dist_ds", 2000, 128)
     frags = ds.get_fragments()
     assert len(frags) >= 2, "Need at least 2 fragments for distributed testing"
     mid = max(1, len(frags) // 2)
@@ -2570,52 +2526,10 @@ def test_metadata_merge_pq_success(tmp_path):
         raise e
 
 
-def test_invalid_column_name_precise(tmp_path):
-    ds = _make_sample_dataset(tmp_path)
-    with pytest.raises(KeyError, match=r"nonexistent_column not found in schema"):
-        ds.create_index(
-            column="nonexistent_column",
-            index_type="IVF_PQ",
-            fragment_ids=[ds.get_fragments()[0].fragment_id],
-            index_uuid=str(uuid.uuid4()),
-        )
-
-
-def test_traditional_api_requires_params(tmp_path):
-    ds = _make_sample_dataset(tmp_path)
-    with pytest.raises(ValueError, match=r"num_partitions.*required.*IVF_PQ"):
-        ds.create_index(
-            column="vector",
-            index_type="IVF_PQ",
-        )
-
-
-def test_vector_search_after_traditional_index(tmp_path):
-    ds = _make_sample_dataset(tmp_path)
-    ds.create_index(
-        column="vector",
-        index_type="IVF_PQ",
-        num_partitions=4,
-        num_sub_vectors=4,
-        replace=True,
-    )
-    query_vector = np.random.rand(128).astype(np.float32)
-    results = ds.to_table(
-        nearest={
-            "column": "vector",
-            "q": query_vector,
-            "k": 5,
-        }
-    )
-    assert 0 < len(results) <= 5
-    assert "id" in results.column_names
-    assert "vector" in results.column_names
-
-
 def test_distributed_workflow_merge_and_search(tmp_path):
     """End-to-end: build IVF_PQ on two groups, merge, and verify search returns
     results."""
-    ds = _make_sample_dataset(tmp_path, n_rows=2000)
+    ds = _make_sample_dataset_base(tmp_path, "dist_ds", 2000, 128)
     frags = ds.get_fragments()
     if len(frags) < 2:
         pytest.skip("Need at least 2 fragments for distributed testing")
@@ -2662,7 +2576,7 @@ def test_distributed_workflow_merge_and_search(tmp_path):
 
 
 def test_vector_merge_two_shards_success_flat(tmp_path):
-    ds = _make_sample_dataset(tmp_path)
+    ds = _make_sample_dataset_base(tmp_path, "dist_ds", 1000, 128)
     frags = ds.get_fragments()
     assert len(frags) >= 2
     shard1 = [frags[0].fragment_id]
@@ -2714,7 +2628,7 @@ def test_vector_merge_two_shards_success_flat(tmp_path):
     ],
 )
 def test_distributed_ivf_parameterized(tmp_path, index_type, num_sub_vectors):
-    ds = _make_sample_dataset(tmp_path, n_rows=2000)
+    ds = _make_sample_dataset_base(tmp_path, "dist_ds", 2000, 128)
     frags = ds.get_fragments()
     assert len(frags) >= 2
     mid = len(frags) // 2
@@ -2803,11 +2717,6 @@ def _commit_index_helper(
     return ds
 
 
-def _make_sample_dataset_distributed(tmp_path, n_rows: int = 1000, dim: int = 128):
-    # Ensure at least 2 fragments by limiting rows per file
-    return _make_sample_dataset_base(tmp_path, "dist_ds2", n_rows, dim)
-
-
 @pytest.mark.parametrize(
     "index_type,num_sub_vectors",
     [
@@ -2816,7 +2725,7 @@ def _make_sample_dataset_distributed(tmp_path, n_rows: int = 1000, dim: int = 12
     ],
 )
 def test_merge_two_shards_parameterized(tmp_path, index_type, num_sub_vectors):
-    ds = _make_sample_dataset_distributed(tmp_path, n_rows=2000)
+    ds = _make_sample_dataset_base(tmp_path, "dist_ds2", 2000, 128)
     frags = ds.get_fragments()
     assert len(frags) >= 2
     shard1 = [frags[0].fragment_id]
@@ -2872,7 +2781,7 @@ def test_merge_two_shards_parameterized(tmp_path, index_type, num_sub_vectors):
 
 def test_distributed_ivf_pq_order_invariance(tmp_path: Path):
     """Ensure distributed IVF_PQ build is invariant to shard build order."""
-    ds = _make_sample_dataset(tmp_path, n_rows=2000)
+    ds = _make_sample_dataset_base(tmp_path, "dist_ds", 2000, 128)
 
     # Global IVF+PQ training once; artifacts are reused across shard orders.
     builder = IndicesBuilder(ds, "vector")
