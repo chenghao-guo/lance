@@ -302,7 +302,7 @@ impl IndexParams for VectorIndexParams {
 pub(crate) async fn build_distributed_vector_index(
     dataset: &Dataset,
     column: &str,
-    name: &str,
+    _name: &str,
     uuid: &str,
     params: &VectorIndexParams,
     frag_reuse_index: Option<Arc<FragReuseIndex>>,
@@ -317,7 +317,7 @@ pub(crate) async fn build_distributed_vector_index(
         });
     };
 
-    let StageParams::Ivf(ivf_params) = &stages[0] else {
+    let StageParams::Ivf(ivf_params0) = &stages[0] else {
         return Err(Error::Index {
             message: format!(
                 "Build Distributed Vector Index: invalid stages: {:?}",
@@ -327,11 +327,11 @@ pub(crate) async fn build_distributed_vector_index(
         });
     };
 
-    if ivf_params.centroids.is_none() {
+    if ivf_params0.centroids.is_none() {
         return Err(Error::Index {
             message: "Build Distributed Vector Index: missing precomputed IVF centroids; \
-            please provide IvfBuildParams.centroids \
-            for concurrent distributed create_index"
+please provide IvfBuildParams.centroids \
+for concurrent distributed create_index"
                 .to_string(),
             location: location!(),
         });
@@ -349,19 +349,21 @@ pub(crate) async fn build_distributed_vector_index(
         }
     }
 
-    // For distributed indexing, we use the fragment count instead of total rows
     let num_rows = dataset.count_rows(None).await?;
     let index_type = params.index_type();
-    let num_partitions = ivf_params.num_partitions.unwrap_or_else(|| {
+
+    let num_partitions = ivf_params0.num_partitions.unwrap_or_else(|| {
         recommended_num_partitions(
             num_rows,
-            ivf_params
+            ivf_params0
                 .target_partition_size
                 .unwrap_or(index_type.target_partition_size()),
         )
     });
-    let mut ivf_params = ivf_params.clone();
+
+    let mut ivf_params = ivf_params0.clone();
     ivf_params.num_partitions = Some(num_partitions);
+
     let ivf_centroids = ivf_params
         .centroids
         .as_ref()
@@ -373,21 +375,59 @@ pub(crate) async fn build_distributed_vector_index(
     let temp_dir_path = Path::from_filesystem_path(&temp_dir)?;
     let shuffler = IvfShuffler::new(temp_dir_path, num_partitions);
 
+    let filtered_dataset = dataset.clone();
+
+    let out_base = dataset.indices_dir().child(uuid);
+
     let make_partial_index_dir = |out_base: &Path| -> Path {
         let shard_uuid = Uuid::new_v4();
         out_base.child(format!("partial_{}", shard_uuid))
     };
+    let new_index_dir = || make_partial_index_dir(&out_base);
 
-    // Create a fragment-filtered dataset for distributed processing
-    let filtered_dataset = dataset.clone();
+    let fragment_filter = fragment_ids.to_vec();
+
+    let make_ivf_model = || IvfModel::new(ivf_centroids.clone(), None);
+
+    let make_global_pq = |pq_params: &PQBuildParams| -> Result<ProductQuantizer> {
+        if pq_params.codebook.is_none() {
+            return Err(Error::Index {
+                message: "Build Distributed Vector Index: missing precomputed PQ codebook; \
+please provide PQBuildParams.codebook for distributed indexing"
+                    .to_string(),
+                location: location!(),
+            });
+        }
+
+        let dim = crate::index::vector::utils::get_vector_dim(filtered_dataset.schema(), column)?;
+        let metric_type = params.metric_type;
+
+        let pre_codebook = pq_params
+            .codebook
+            .clone()
+            .expect("checked above that PQ codebook is present");
+        let codebook_fsl =
+            arrow_array::FixedSizeListArray::try_new_from_values(pre_codebook, dim as i32)?;
+
+        Ok(ProductQuantizer::new(
+            pq_params.num_sub_vectors,
+            pq_params.num_bits as u32,
+            dim,
+            codebook_fsl,
+            if metric_type == MetricType::Cosine {
+                MetricType::L2
+            } else {
+                metric_type
+            },
+        ))
+    };
 
     match index_type {
         IndexType::IvfFlat => match element_type {
             DataType::Float16 | DataType::Float32 | DataType::Float64 => {
-                // Write into per-fragment subdir to avoid conflicts during distributed builds
-                let out_base = dataset.indices_dir().child(uuid);
-                let index_dir = make_partial_index_dir(&out_base);
-                let ivf_model = IvfModel::new(ivf_centroids.clone(), None);
+                let index_dir = new_index_dir();
+                let ivf_model = make_ivf_model();
+
                 IvfIndexBuilder::<FlatIndex, FlatQuantizer>::new(
                     filtered_dataset,
                     column.to_owned(),
@@ -400,15 +440,13 @@ pub(crate) async fn build_distributed_vector_index(
                     frag_reuse_index,
                 )?
                 .with_ivf(ivf_model)
-                .with_fragment_filter(fragment_ids.to_vec())
+                .with_fragment_filter(fragment_filter)
                 .build()
                 .await?;
             }
             DataType::UInt8 => {
-                // Write into per-fragment subdir to avoid conflicts during distributed builds
-                let out_base = dataset.indices_dir().child(uuid);
-                let index_dir = make_partial_index_dir(&out_base);
-                let ivf_model = IvfModel::new(ivf_centroids.clone(), None);
+                let index_dir = new_index_dir();
+                let ivf_model = make_ivf_model();
 
                 IvfIndexBuilder::<FlatIndex, FlatBinQuantizer>::new(
                     filtered_dataset,
@@ -422,7 +460,7 @@ pub(crate) async fn build_distributed_vector_index(
                     frag_reuse_index,
                 )?
                 .with_ivf(ivf_model)
-                .with_fragment_filter(fragment_ids.to_vec())
+                .with_fragment_filter(fragment_filter)
                 .build()
                 .await?;
             }
@@ -436,6 +474,7 @@ pub(crate) async fn build_distributed_vector_index(
                 });
             }
         },
+
         IndexType::IvfPq => {
             let len = stages.len();
             let StageParams::PQ(pq_params) = &stages[len - 1] else {
@@ -457,51 +496,9 @@ pub(crate) async fn build_distributed_vector_index(
                     });
                 }
                 IndexFileVersion::V3 => {
-                    // Write into per-fragment subdir to avoid conflicts during distributed builds
-                    let out_base = dataset.indices_dir().child(uuid);
-                    let index_dir = make_partial_index_dir(&out_base);
-
-                    // Train global artifacts ONCE and reuse across shards under the shared UUID.
-                    // If a precomputed training file exists, load it; otherwise train and persist.
-                    let dim = crate::index::vector::utils::get_vector_dim(
-                        filtered_dataset.schema(),
-                        column,
-                    )?;
-                    let metric_type = params.metric_type;
-
-                    if pq_params.codebook.is_none() {
-                        return Err(Error::Index {
-                            message:
-                                "Build Distributed Vector Index: missing precomputed PQ codebook; \
-                            please provide PQBuildParams.codebook for IVF_PQ distributed indexing"
-                                    .to_string(),
-                            location: location!(),
-                        });
-                    }
-
-                    let pre_codebook = pq_params
-                        .codebook
-                        .clone()
-                        .expect("checked above that PQ codebook is present");
-                    let codebook_fsl = arrow_array::FixedSizeListArray::try_new_from_values(
-                        pre_codebook,
-                        dim as i32,
-                    )?;
-
-                    let ivf_model = IvfModel::new(ivf_centroids.clone(), None);
-                    let global_pq = ProductQuantizer::new(
-                        pq_params.num_sub_vectors,
-                        pq_params.num_bits as u32,
-                        dim,
-                        codebook_fsl,
-                        if metric_type == MetricType::Cosine {
-                            MetricType::L2
-                        } else {
-                            metric_type
-                        },
-                    );
-
-                    let (ivf_model, global_pq) = (ivf_model, global_pq);
+                    let index_dir = new_index_dir();
+                    let ivf_model = make_ivf_model();
+                    let global_pq = make_global_pq(pq_params)?;
 
                     IvfIndexBuilder::<FlatIndex, ProductQuantizer>::new(
                         filtered_dataset,
@@ -516,12 +513,13 @@ pub(crate) async fn build_distributed_vector_index(
                     )?
                     .with_ivf(ivf_model)
                     .with_quantizer(global_pq)
-                    .with_fragment_filter(fragment_ids.to_vec())
+                    .with_fragment_filter(fragment_filter)
                     .build()
                     .await?;
                 }
             }
         }
+
         IndexType::IvfSq => {
             let StageParams::SQ(sq_params) = &stages[1] else {
                 return Err(Error::Index {
@@ -533,9 +531,8 @@ pub(crate) async fn build_distributed_vector_index(
                 });
             };
 
-            // Write into per-fragment subdir to avoid conflicts during distributed builds
-            let out_base = dataset.indices_dir().child(uuid);
-            let index_dir = make_partial_index_dir(&out_base);
+            let index_dir = new_index_dir();
+
             IvfIndexBuilder::<FlatIndex, ScalarQuantizer>::new(
                 filtered_dataset,
                 column.to_owned(),
@@ -547,10 +544,11 @@ pub(crate) async fn build_distributed_vector_index(
                 (),
                 frag_reuse_index,
             )?
-            .with_fragment_filter(fragment_ids.to_vec())
+            .with_fragment_filter(fragment_filter)
             .build()
             .await?;
         }
+
         IndexType::IvfHnswFlat => {
             let StageParams::Hnsw(hnsw_params) = &stages[1] else {
                 return Err(Error::Index {
@@ -561,9 +559,9 @@ pub(crate) async fn build_distributed_vector_index(
                     location: location!(),
                 });
             };
-            // Write into per-fragment subdir to avoid conflicts during distributed builds
-            let out_base = dataset.indices_dir().child(uuid);
-            let index_dir = make_partial_index_dir(&out_base);
+
+            let index_dir = new_index_dir();
+
             IvfIndexBuilder::<HNSW, FlatQuantizer>::new(
                 filtered_dataset,
                 column.to_owned(),
@@ -575,10 +573,11 @@ pub(crate) async fn build_distributed_vector_index(
                 hnsw_params.clone(),
                 frag_reuse_index,
             )?
-            .with_fragment_filter(fragment_ids.to_vec())
+            .with_fragment_filter(fragment_filter)
             .build()
             .await?;
         }
+
         IndexType::IvfHnswPq => {
             let StageParams::Hnsw(hnsw_params) = &stages[1] else {
                 return Err(Error::Index {
@@ -598,40 +597,10 @@ pub(crate) async fn build_distributed_vector_index(
                     location: location!(),
                 });
             };
-            // Write into per-fragment subdir to avoid conflicts during distributed builds
-            let out_base = dataset.indices_dir().child(uuid);
-            let index_dir = make_partial_index_dir(&out_base);
 
-            // Train global IVF model and PQ quantizer (residual) once for all shards
-            let dim =
-                crate::index::vector::utils::get_vector_dim(filtered_dataset.schema(), column)?;
-            let metric_type = params.metric_type;
-            let ivf_model = IvfModel::new(ivf_centroids.clone(), None);
-
-            if pq_params.codebook.is_none() {
-                return Err(Error::Index {
-                    message: "Build Distributed Vector Index: missing precomputed PQ codebook; please provide PQBuildParams.codebook for IVF_HNSW_PQ distributed indexing".to_string(),
-                    location: location!(),
-                });
-            }
-
-            let pre_codebook = pq_params
-                .codebook
-                .clone()
-                .expect("checked above that PQ codebook is present");
-            let codebook_fsl =
-                arrow_array::FixedSizeListArray::try_new_from_values(pre_codebook, dim as i32)?;
-            let global_pq = ProductQuantizer::new(
-                pq_params.num_sub_vectors,
-                pq_params.num_bits as u32,
-                dim,
-                codebook_fsl,
-                if metric_type == MetricType::Cosine {
-                    MetricType::L2
-                } else {
-                    metric_type
-                },
-            );
+            let index_dir = new_index_dir();
+            let ivf_model = make_ivf_model();
+            let global_pq = make_global_pq(pq_params)?;
 
             IvfIndexBuilder::<HNSW, ProductQuantizer>::new(
                 filtered_dataset,
@@ -646,10 +615,11 @@ pub(crate) async fn build_distributed_vector_index(
             )?
             .with_ivf(ivf_model)
             .with_quantizer(global_pq)
-            .with_fragment_filter(fragment_ids.to_vec())
+            .with_fragment_filter(fragment_filter)
             .build()
             .await?;
         }
+
         IndexType::IvfHnswSq => {
             let StageParams::Hnsw(hnsw_params) = &stages[1] else {
                 return Err(Error::Index {
@@ -669,9 +639,9 @@ pub(crate) async fn build_distributed_vector_index(
                     location: location!(),
                 });
             };
-            // Write into per-fragment subdir to avoid conflicts during distributed builds
-            let out_base = dataset.indices_dir().child(uuid);
-            let index_dir = make_partial_index_dir(&out_base);
+
+            let index_dir = new_index_dir();
+
             IvfIndexBuilder::<HNSW, ScalarQuantizer>::new(
                 filtered_dataset,
                 column.to_owned(),
@@ -683,21 +653,22 @@ pub(crate) async fn build_distributed_vector_index(
                 hnsw_params.clone(),
                 frag_reuse_index,
             )?
-            .with_fragment_filter(fragment_ids.to_vec())
+            .with_fragment_filter(fragment_filter)
             .build()
             .await?;
         }
+
         IndexType::IvfRq => {
-            // Distributed indexing explicitly does not support IVF_RQ; skip silently
             return Err(Error::Index {
                 message: format!(
                     "Build Distributed Vector Index: invalid index type: {:?} \
-                    is not supported in distributed mode; skipping this shard",
+is not supported in distributed mode; skipping this shard",
                     index_type
                 ),
                 location: location!(),
             });
         }
+
         _ => {
             return Err(Error::Index {
                 message: format!(
@@ -708,6 +679,7 @@ pub(crate) async fn build_distributed_vector_index(
             });
         }
     };
+
     Ok(())
 }
 

@@ -39,7 +39,7 @@ use lance_index::vector::quantizer::{
     QuantizationMetadata, QuantizationType, QuantizerBuildParams,
 };
 use lance_index::vector::quantizer::{QuantizerMetadata, QuantizerStorage};
-use lance_index::vector::shared::{write_unified_ivf_and_index_metadata, SupportedIndexType};
+use lance_index::vector::shared::{write_unified_ivf_and_index_metadata, SupportedIvfIndexType};
 use lance_index::vector::storage::STORAGE_METADATA_KEY;
 use lance_index::vector::transform::Flatten;
 use lance_index::vector::utils::is_finite;
@@ -1076,7 +1076,7 @@ impl<S: IvfSubIndex + 'static, Q: Quantization + 'static> IvfIndexBuilder<S, Q> 
         );
 
         let index_type_str = index_type_string(S::name().try_into()?, Q::quantization_type());
-        if let Some(idx_type) = SupportedIndexType::from_index_type_str(&index_type_str) {
+        if let Some(idx_type) = SupportedIvfIndexType::from_index_type_str(&index_type_str) {
             write_unified_ivf_and_index_metadata(
                 &mut index_writer,
                 &index_ivf,
