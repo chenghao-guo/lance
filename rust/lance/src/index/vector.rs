@@ -1354,20 +1354,13 @@ pub(crate) async fn open_vector_index_v2(
     let index: Arc<dyn VectorIndex> = match index_metadata.index_type.as_str() {
         "IVF_HNSW_PQ" => {
             let aux_path = index_dir.child(uuid).child(INDEX_AUXILIARY_FILE_NAME);
-            let scheduler = lance_io::scheduler::ScanScheduler::new(
-                std::sync::Arc::new(dataset.object_store().clone()),
-                lance_io::scheduler::SchedulerConfig::max_bandwidth(dataset.object_store()),
-            );
-            let file = scheduler
-                .open_file(&aux_path, &lance_io::utils::CachedFileSize::unknown())
-                .await?;
-            let aux_reader = file.reader().clone();
+            let aux_reader = dataset.object_store().open(&aux_path).await?;
 
             let ivf_data = IvfModel::load(&reader).await?;
             let options = HNSWIndexOptions { use_residual: true };
             let hnsw = HNSWIndex::<ProductQuantizer>::try_new(
                 reader.object_reader.clone(),
-                aux_reader,
+                aux_reader.into(),
                 options,
             )
             .await?;
@@ -1388,14 +1381,7 @@ pub(crate) async fn open_vector_index_v2(
 
         "IVF_HNSW_SQ" => {
             let aux_path = index_dir.child(uuid).child(INDEX_AUXILIARY_FILE_NAME);
-            let scheduler = lance_io::scheduler::ScanScheduler::new(
-                std::sync::Arc::new(dataset.object_store().clone()),
-                lance_io::scheduler::SchedulerConfig::max_bandwidth(dataset.object_store()),
-            );
-            let file = scheduler
-                .open_file(&aux_path, &lance_io::utils::CachedFileSize::unknown())
-                .await?;
-            let aux_reader = file.reader().clone();
+            let aux_reader = dataset.object_store().open(&aux_path).await?;
 
             let ivf_data = IvfModel::load(&reader).await?;
             let options = HNSWIndexOptions {
@@ -1404,43 +1390,7 @@ pub(crate) async fn open_vector_index_v2(
 
             let hnsw = HNSWIndex::<ScalarQuantizer>::try_new(
                 reader.object_reader.clone(),
-                aux_reader,
-                options,
-            )
-            .await?;
-            let pb_ivf = pb::Ivf::try_from(&ivf_data)?;
-            let ivf = IvfModel::try_from(pb_ivf)?;
-
-            Arc::new(IVFIndex::try_new(
-                uuid,
-                ivf,
-                reader.object_reader.clone(),
-                Arc::new(hnsw),
-                distance_type,
-                dataset
-                    .index_cache
-                    .for_index(uuid, frag_reuse_uuid.as_ref()),
-            )?)
-        }
-
-        "IVF_HNSW_FLAT" => {
-            let aux_path = index_dir.child(uuid).child(INDEX_AUXILIARY_FILE_NAME);
-            let scheduler = lance_io::scheduler::ScanScheduler::new(
-                std::sync::Arc::new(dataset.object_store().clone()),
-                lance_io::scheduler::SchedulerConfig::max_bandwidth(dataset.object_store()),
-            );
-            let file = scheduler
-                .open_file(&aux_path, &lance_io::utils::CachedFileSize::unknown())
-                .await?;
-            let aux_reader = file.reader().clone();
-
-            let ivf_data = IvfModel::load(&reader).await?;
-            let options = HNSWIndexOptions {
-                use_residual: false,
-            };
-            let hnsw = HNSWIndex::<FlatQuantizer>::try_new(
-                reader.object_reader.clone(),
-                aux_reader,
+                aux_reader.into(),
                 options,
             )
             .await?;
@@ -2743,7 +2693,6 @@ mod tests {
             source_sq_params.num_bits, target_sq_params.num_bits,
             "SQ num_bits should match"
         );
-        assert_eq!(target_sq_params.num_bits, 8, "SQ should use 8 bits");
 
         // Verify the index is functional by performing a search
         let query_vector = lance_datagen::gen_batch()
@@ -3004,7 +2953,7 @@ mod tests {
             "HNSW ef_construction should be extracted as 120 from source index"
         );
 
-        // Verify the index is functional by performing a search
+        // Verify the index is functional
         let query_vector = lance_datagen::gen_batch()
             .anon_col(array::rand_vec::<Float32Type>(32.into()))
             .into_batch_rows(RowCount::from(1))
@@ -3159,6 +3108,18 @@ mod tests {
             source_ivf_model.num_partitions(),
             target_ivf_model.num_partitions(),
             "Source and target should have same number of partitions"
+        );
+
+        // Check sub_index contains SQ information
+        let sub_index = stats
+            .get("sub_index")
+            .and_then(|v| v.as_object())
+            .expect("IVF_HNSW_SQ index should have sub_index");
+        // Verify SQ parameters
+        assert_eq!(
+            sub_index.get("num_bits").and_then(|v| v.as_u64()),
+            Some(8),
+            "SQ should use 8 bits"
         );
 
         // Verify the centroids are exactly the same (key verification for delta indices)
