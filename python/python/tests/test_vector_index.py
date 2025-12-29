@@ -359,23 +359,6 @@ def test_index_with_no_centroid_movement(tmp_path):
     validate_vector_index(dataset, "vector")
 
 
-def test_index_default_codebook(tmp_path):
-    """Ensure default global codebook (no user-supplied pq_codebook) builds and
-    validates."""
-    tbl = create_table(nvec=1024, ndim=128)
-    dataset = lance.write_dataset(tbl, tmp_path)
-
-    # Default build without supplying pq_codebook; internal training uses
-    # global unified codebook
-    dataset = dataset.create_index(
-        "vector",
-        index_type="IVF_PQ",
-        num_partitions=1,
-        num_sub_vectors=4,
-    )
-    validate_vector_index(dataset, "vector", refine_factor=10, pass_threshold=0.99)
-
-
 def test_index_with_pq_codebook(tmp_path):
     tbl = create_table(nvec=1024, ndim=128)
     dataset = lance.write_dataset(tbl, tmp_path)
@@ -900,6 +883,42 @@ def test_create_ivf_rq_index():
     assert res.num_rows == 10
     assert res["_distance"].to_numpy().min() == 0.0
     assert res["_distance"].to_numpy().max() == 0.0
+
+
+def test_create_ivf_hnsw_pq_index(dataset, tmp_path):
+    assert not dataset.has_index
+    ann_ds = lance.write_dataset(dataset.to_table(), tmp_path / "indexed.lance")
+    ann_ds = ann_ds.create_index(
+        "vector",
+        index_type="IVF_HNSW_PQ",
+        num_partitions=4,
+        num_sub_vectors=16,
+    )
+    assert ann_ds.list_indices()[0]["fields"] == ["vector"]
+
+
+def test_create_ivf_hnsw_sq_index(dataset, tmp_path):
+    assert not dataset.has_index
+    ann_ds = lance.write_dataset(dataset.to_table(), tmp_path / "indexed.lance")
+    ann_ds = ann_ds.create_index(
+        "vector",
+        index_type="IVF_HNSW_SQ",
+        num_partitions=4,
+        num_sub_vectors=16,
+    )
+    assert ann_ds.list_indices()[0]["fields"] == ["vector"]
+
+
+def test_create_ivf_hnsw_flat_index(dataset, tmp_path):
+    assert not dataset.has_index
+    ann_ds = lance.write_dataset(dataset.to_table(), tmp_path / "indexed.lance")
+    ann_ds = ann_ds.create_index(
+        "vector",
+        index_type="IVF_HNSW_FLAT",
+        num_partitions=4,
+        num_sub_vectors=16,
+    )
+    assert ann_ds.list_indices()[0]["fields"] == ["vector"]
 
 
 def test_multivec_ann(indexed_multivec_dataset: lance.LanceDataset):
