@@ -805,16 +805,9 @@ impl DatasetIndexExt for Dataset {
         // TODO: At some point we should just fail if the index details are missing and ask the user to
         // retrain the index.
         indices.sort_by_key(|idx| idx.fields[0]);
-        // Group indices by field id without holding non-Send iterators across await
-        let mut grouped: Vec<(i32, Vec<&IndexMetadata>)> = Vec::new();
-        {
-            let by_field = indices.into_iter().chunk_by(|idx| idx.fields[0]);
-            for (field_id, group) in &by_field {
-                let group_vec = group.collect::<Vec<_>>();
-                grouped.push((field_id, group_vec));
-            }
-        }
-        for (field_id, indices) in grouped {
+        let indice_by_field = indices.into_iter().chunk_by(|idx| idx.fields[0]);
+        for (field_id, indices) in &indice_by_field {
+            let indices = indices.collect::<Vec<_>>();
             let has_multiple = indices.len() > 1;
             for idx in indices {
                 let field = self.schema().field_by_id(field_id);
