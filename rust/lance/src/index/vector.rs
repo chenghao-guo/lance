@@ -2694,7 +2694,7 @@ mod tests {
             "SQ num_bits should match"
         );
 
-        // Verify the index is functional by performing a search
+        // Verify the index is functional
         let query_vector = lance_datagen::gen_batch()
             .anon_col(array::rand_vec::<Float32Type>(32.into()))
             .into_batch_rows(RowCount::from(1))
@@ -3115,6 +3115,7 @@ mod tests {
             .get("sub_index")
             .and_then(|v| v.as_object())
             .expect("IVF_HNSW_SQ index should have sub_index");
+
         // Verify SQ parameters
         assert_eq!(
             sub_index.get("num_bits").and_then(|v| v.as_u64()),
