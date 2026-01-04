@@ -53,9 +53,8 @@ use lance_index::metrics::MetricsCollector;
 use lance_index::metrics::NoOpMetricsCollector;
 use lance_index::vector::bq::builder::RabitQuantizer;
 use lance_index::vector::flat::index::{FlatBinQuantizer, FlatIndex, FlatQuantizer};
-use lance_index::vector::graph::{DISTS_FIELD, NEIGHBORS_FIELD};
 use lance_index::vector::hnsw::builder::HNSW_METADATA_KEY;
-use lance_index::vector::hnsw::{HnswMetadata, VECTOR_ID_FIELD};
+use lance_index::vector::hnsw::HnswMetadata;
 use lance_index::vector::ivf::storage::{IvfModel, IVF_METADATA_KEY};
 use lance_index::vector::kmeans::KMeansParams;
 use lance_index::vector::pq::storage::transpose;
@@ -1993,11 +1992,7 @@ pub async fn finalize_distributed_merge(
     let obj_writer = object_store.create(&index_path).await?;
 
     // Schema for HNSW sub-index: include neighbors/dist fields; empty batch is fine.
-    let arrow_schema = Arc::new(arrow_schema::Schema::new(vec![
-        VECTOR_ID_FIELD.clone(),
-        NEIGHBORS_FIELD.clone(),
-        DISTS_FIELD.clone(),
-    ]));
+    let arrow_schema = HNSW::schema();
     let schema = lance_core::datatypes::Schema::try_from(arrow_schema.as_ref())?;
     let mut v2_writer = V2Writer::try_new(obj_writer, schema, V2WriterOptions::default())?;
 

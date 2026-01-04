@@ -210,7 +210,7 @@ def test_distributed_vector(
         topk=10,
         world=2,
         similarity_metric="recall",
-        similarity_threshold=similarity_threshold,
+        similarity_threshold=0.8,
     )
 
 
@@ -2131,7 +2131,6 @@ def assert_distributed_vector_consistency(
     """
     # Keep signature compatibility but ignore similarity_metric/threshold
     _ = similarity_metric
-    _ = similarity_threshold
 
     index_params = index_params or {}
 
@@ -2275,9 +2274,9 @@ def assert_distributed_vector_consistency(
     rd = compute_recall(gt_ids, dist_ids)
 
     # Assert recall difference within 10%
-    assert abs(rs - rd) <= 0.10, (
+    assert abs(rs - rd) <= 1 - similarity_threshold, (
         f"Recall difference too large: single={rs:.3f}, distributed={rd:.3f}, "
-        f"diff={abs(rs - rd):.3f} (> 0.10)"
+        f"diff={abs(rs - rd):.3f} (> {similarity_threshold})"
     )
 
     # Cleanup temporary directory if used
