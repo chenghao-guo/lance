@@ -186,14 +186,14 @@ def test_ann(indexed_dataset):
 @pytest.mark.parametrize(
     "fixture_name,index_type,index_params,similarity_threshold",
     [
-        ("dataset", "IVF_FLAT", {"num_partitions": 4}, 0.95),
+        ("dataset", "IVF_FLAT", {"num_partitions": 4}, 0.80),
         (
             "indexed_dataset",
             "IVF_PQ",
             {"num_partitions": 4, "num_sub_vectors": 16},
-            0.90,
+            0.80,
         ),
-        ("dataset", "IVF_SQ", {"num_partitions": 4}, 0.90),
+        ("dataset", "IVF_SQ", {"num_partitions": 4}, 0.80),
     ],
 )
 def test_distributed_vector(
@@ -210,7 +210,7 @@ def test_distributed_vector(
         topk=10,
         world=2,
         similarity_metric="recall",
-        similarity_threshold=0.8,
+        similarity_threshold=similarity_threshold,
     )
 
 
